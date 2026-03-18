@@ -384,7 +384,7 @@ fn build_reviewer(
     match kind {
         ProviderKind::Minimax => {
             let url = base_url.unwrap_or_else(|| "https://api.minimax.chat/v1".into());
-            let mid = model_id.unwrap_or_else(|| "MiniMax-M2.5".into());
+            let mid = model_id.unwrap_or_else(|| "MiniMax-M2.7".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
             Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout)))
