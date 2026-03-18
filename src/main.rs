@@ -10,21 +10,33 @@ use std::path::PathBuf;
 use std::process;
 
 use anyhow::{Context, Result};
-use clap::Parser as ClapParser;
+use clap::{Parser as ClapParser, ValueEnum};
+use rig::providers::{anthropic, deepseek, gemini, openai};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::models::deepseek::DeepSeekReviewer;
-use crate::models::minimax::MinimaxReviewer;
+use crate::models::reviewer::LlmReviewer;
+use crate::models::{ReviewFocus, Reviewer};
+
+// ── Provider selection ─────────────────────────────────────────────────────────
+
+#[derive(ValueEnum, Clone, Debug)]
+enum ProviderKind {
+    Minimax,
+    Deepseek,
+    Anthropic,
+    Gemini,
+    Openai,
+}
 
 // ── CLI definition ─────────────────────────────────────────────────────────────
 
 #[derive(ClapParser, Debug)]
 #[command(
-    name        = "ai-reviewer",
+    name       = "ai-reviewer",
     version,
-    about       = "AI-to-AI code review engine: MiniMax × DeepSeek cross-validation",
-    long_about  = None,
+    about      = "AI-to-AI code review engine: 4-model dual-pair cross-validation with multi-provider support",
+    long_about = None,
 )]
 struct Cli {
     /// Path to unified diff file, or "-" to read from stdin
@@ -35,7 +47,7 @@ struct Cli {
     #[arg(short = 's', long, value_name = "PATH", default_value = ".")]
     source_root: PathBuf,
 
-    /// Security/coding policy Markdown file (injected into system prompt & cached)
+    /// Security/coding policy Markdown file (injected into system prompt)
     #[arg(short = 'p', long, value_name = "PATH")]
     policy: PathBuf,
 
@@ -43,29 +55,85 @@ struct Cli {
     #[arg(short = 't', long, default_value_t = 0.90)]
     threshold: f64,
 
-    /// Output path for the Markdown review report
-    #[arg(short = 'o', long, value_name = "PATH", default_value = "review-report.md")]
-    output: PathBuf,
+    /// Output path for the Markdown review report (defaults to <source-root>/review-report.md)
+    #[arg(short = 'o', long, value_name = "PATH")]
+    output: Option<PathBuf>,
 
     /// Maximum self-correction retries per model
     #[arg(long, default_value_t = 3)]
     max_retries: u32,
 
-    /// MiniMax model ID
-    #[arg(long, default_value = "MiniMax-M2.5", env = "MINIMAX_MODEL")]
-    model_minimax: String,
+    // ── Style pair: Reviewer 1 ─────────────────────────────────────────────────
 
-    /// MiniMax API base URL (Anthropic-compat endpoint)
-    #[arg(long, default_value = "https://api.minimax.chat/v1", env = "MINIMAX_BASE_URL")]
-    minimax_base_url: String,
+    /// Style reviewer A provider
+    #[arg(long, default_value = "minimax", env = "REVIEWER_1")]
+    reviewer_1: ProviderKind,
 
-    /// DeepSeek model ID
-    #[arg(long, default_value = "deepseek-chat", env = "DEEPSEEK_MODEL")]
-    model_deepseek: String,
+    /// Style reviewer A model ID
+    #[arg(long, env = "REVIEWER_1_MODEL")]
+    reviewer_1_model: Option<String>,
 
-    /// DeepSeek API base URL (OpenAI-compat endpoint)
-    #[arg(long, default_value = "https://api.deepseek.com/v1", env = "DEEPSEEK_BASE_URL")]
-    deepseek_base_url: String,
+    /// Style reviewer A API key  [fallback: MINIMAX_API_KEY]
+    #[arg(long, env = "REVIEWER_1_API_KEY")]
+    reviewer_1_api_key: Option<String>,
+
+    /// Style reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
+    #[arg(long, env = "REVIEWER_1_BASE_URL")]
+    reviewer_1_base_url: Option<String>,
+
+    // ── Style pair: Reviewer 2 ─────────────────────────────────────────────────
+
+    /// Style reviewer B provider
+    #[arg(long, default_value = "deepseek", env = "REVIEWER_2")]
+    reviewer_2: ProviderKind,
+
+    /// Style reviewer B model ID
+    #[arg(long, env = "REVIEWER_2_MODEL")]
+    reviewer_2_model: Option<String>,
+
+    /// Style reviewer B API key  [fallback: DEEPSEEK_API_KEY]
+    #[arg(long, env = "REVIEWER_2_API_KEY")]
+    reviewer_2_api_key: Option<String>,
+
+    /// Style reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
+    #[arg(long, env = "REVIEWER_2_BASE_URL")]
+    reviewer_2_base_url: Option<String>,
+
+    // ── Logic pair: Reviewer 3 ─────────────────────────────────────────────────
+
+    /// Logic reviewer A provider
+    #[arg(long, default_value = "minimax", env = "REVIEWER_3")]
+    reviewer_3: ProviderKind,
+
+    /// Logic reviewer A model ID
+    #[arg(long, env = "REVIEWER_3_MODEL")]
+    reviewer_3_model: Option<String>,
+
+    /// Logic reviewer A API key  [fallback: MINIMAX_API_KEY]
+    #[arg(long, env = "REVIEWER_3_API_KEY")]
+    reviewer_3_api_key: Option<String>,
+
+    /// Logic reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
+    #[arg(long, env = "REVIEWER_3_BASE_URL")]
+    reviewer_3_base_url: Option<String>,
+
+    // ── Logic pair: Reviewer 4 ─────────────────────────────────────────────────
+
+    /// Logic reviewer B provider
+    #[arg(long, default_value = "deepseek", env = "REVIEWER_4")]
+    reviewer_4: ProviderKind,
+
+    /// Logic reviewer B model ID
+    #[arg(long, env = "REVIEWER_4_MODEL")]
+    reviewer_4_model: Option<String>,
+
+    /// Logic reviewer B API key  [fallback: DEEPSEEK_API_KEY]
+    #[arg(long, env = "REVIEWER_4_API_KEY")]
+    reviewer_4_api_key: Option<String>,
+
+    /// Logic reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
+    #[arg(long, env = "REVIEWER_4_BASE_URL")]
+    reviewer_4_base_url: Option<String>,
 
     /// Enable verbose tracing output (or set RUST_LOG=info/debug)
     #[arg(short = 'v', long)]
@@ -114,8 +182,7 @@ async fn run() -> Result<bool> {
     );
 
     // ── Parse diff ─────────────────────────────────────────────────────────
-    let file_diffs = diff::parse_diff(&diff_text)
-        .context("Failed to parse unified diff")?;
+    let file_diffs = diff::parse_diff(&diff_text).context("Failed to parse unified diff")?;
 
     if file_diffs.is_empty() {
         eprintln!("[ai-reviewer] No file changes found in diff. Exiting with PASS.");
@@ -128,7 +195,6 @@ async fn run() -> Result<bool> {
     // ── Extract AST contexts ───────────────────────────────────────────────
     let mut ast_contexts = Vec::new();
     for fd in &changed_files {
-        // Split the raw diff back into per-file chunks for the prompt
         let file_raw_diff = extract_file_diff_chunk(&diff_text, fd);
         let ctx = ast::extract_context(fd, &cli.source_root, &file_raw_diff)?;
         info!(
@@ -140,71 +206,212 @@ async fn run() -> Result<bool> {
         ast_contexts.push(ctx);
     }
 
-    // ── API keys ───────────────────────────────────────────────────────────
-    let minimax_key = std::env::var("MINIMAX_API_KEY")
-        .context("MINIMAX_API_KEY environment variable not set")?;
-    let deepseek_key = std::env::var("DEEPSEEK_API_KEY")
-        .context("DEEPSEEK_API_KEY environment variable not set")?;
+    // ── Resolve API keys ───────────────────────────────────────────────────
+    let key_1 = resolve_api_key(
+        cli.reviewer_1_api_key.as_deref(),
+        "REVIEWER_1_API_KEY",
+        "MINIMAX_API_KEY",
+    )?;
+    let key_2 = resolve_api_key(
+        cli.reviewer_2_api_key.as_deref(),
+        "REVIEWER_2_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )?;
+    let key_3 = resolve_api_key(
+        cli.reviewer_3_api_key.as_deref(),
+        "REVIEWER_3_API_KEY",
+        "MINIMAX_API_KEY",
+    )?;
+    let key_4 = resolve_api_key(
+        cli.reviewer_4_api_key.as_deref(),
+        "REVIEWER_4_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )?;
+
+    let base_url_1 = cli.reviewer_1_base_url.clone()
+        .or_else(|| std::env::var("MINIMAX_BASE_URL").ok());
+    let base_url_2 = cli.reviewer_2_base_url.clone()
+        .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
+    let base_url_3 = cli.reviewer_3_base_url.clone()
+        .or_else(|| std::env::var("MINIMAX_BASE_URL").ok());
+    let base_url_4 = cli.reviewer_4_base_url.clone()
+        .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
 
     // ── Build reviewers ────────────────────────────────────────────────────
-    let minimax_reviewer = MinimaxReviewer::with_config(
-        minimax_key,
-        cli.minimax_base_url.clone(),
-        cli.model_minimax.clone(),
+    let reviewer_style_a = build_reviewer(
+        cli.reviewer_1.clone(),
+        key_1,
+        base_url_1,
+        cli.reviewer_1_model.clone(),
         cli.max_retries,
-    );
-    let deepseek_reviewer = DeepSeekReviewer::with_config(
-        deepseek_key,
-        cli.deepseek_base_url.clone(),
-        cli.model_deepseek.clone(),
+        ReviewFocus::Style,
+    )
+    .context("Failed to build style reviewer A")?;
+
+    let reviewer_style_b = build_reviewer(
+        cli.reviewer_2.clone(),
+        key_2,
+        base_url_2,
+        cli.reviewer_2_model.clone(),
         cli.max_retries,
+        ReviewFocus::Style,
+    )
+    .context("Failed to build style reviewer B")?;
+
+    let reviewer_logic_a = build_reviewer(
+        cli.reviewer_3.clone(),
+        key_3,
+        base_url_3,
+        cli.reviewer_3_model.clone(),
+        cli.max_retries,
+        ReviewFocus::Logic,
+    )
+    .context("Failed to build logic reviewer A")?;
+
+    let reviewer_logic_b = build_reviewer(
+        cli.reviewer_4.clone(),
+        key_4,
+        base_url_4,
+        cli.reviewer_4_model.clone(),
+        cli.max_retries,
+        ReviewFocus::Logic,
+    )
+    .context("Failed to build logic reviewer B")?;
+
+    let label_sa = reviewer_style_a.label().to_owned();
+    let label_sb = reviewer_style_b.label().to_owned();
+    let label_la = reviewer_logic_a.label().to_owned();
+    let label_lb = reviewer_logic_b.label().to_owned();
+
+    info!(
+        style_a = %label_sa,
+        style_b = %label_sb,
+        logic_a = %label_la,
+        logic_b = %label_lb,
+        "Dispatching 4-way concurrent review"
     );
 
-    // ── Concurrent dual-model review ───────────────────────────────────────
-    info!("Dispatching concurrent review requests to MiniMax and DeepSeek");
+    // ── 4-way concurrent review ────────────────────────────────────────────
+    let ctx_sa = ast_contexts.clone();
+    let ctx_sb = ast_contexts.clone();
+    let ctx_la = ast_contexts.clone();
+    let ctx_lb = ast_contexts.clone();
+    let policy_sa = policy_text.clone();
+    let policy_sb = policy_text.clone();
+    let policy_la = policy_text.clone();
+    let policy_lb = policy_text.clone();
 
-    let contexts_mm = ast_contexts.clone();
-    let contexts_ds = ast_contexts.clone();
-    let policy_mm   = policy_text.clone();
-    let policy_ds   = policy_text.clone();
-
-    let (mm_res, ds_res) = tokio::join!(
-        async move { minimax_reviewer.review(&contexts_mm, &policy_mm).await },
-        async move { deepseek_reviewer.review(&contexts_ds, &policy_ds).await },
+    let (r_sa, r_sb, r_la, r_lb) = tokio::join!(
+        async move { reviewer_style_a.review(&ctx_sa, &policy_sa).await },
+        async move { reviewer_style_b.review(&ctx_sb, &policy_sb).await },
+        async move { reviewer_logic_a.review(&ctx_la, &policy_la).await },
+        async move { reviewer_logic_b.review(&ctx_lb, &policy_lb).await },
     );
 
     info!(
-        minimax_ok  = mm_res.is_ok(),
-        deepseek_ok = ds_res.is_ok(),
-        "Both reviewers completed"
+        style_a_ok = r_sa.is_ok(),
+        style_b_ok = r_sb.is_ok(),
+        logic_a_ok = r_la.is_ok(),
+        logic_b_ok = r_lb.is_ok(),
+        "All 4 reviewers completed"
     );
 
     // ── Consensus evaluation ───────────────────────────────────────────────
-    let consensus = consensus::evaluate(mm_res, ds_res);
+    let style_pair = consensus::evaluate_pair(r_sa, r_sb, label_sa, label_sb, ReviewFocus::Style);
+    let logic_pair = consensus::evaluate_pair(r_la, r_lb, label_la, label_lb, ReviewFocus::Logic);
+    let consensus = consensus::evaluate(style_pair, logic_pair);
 
     // ── Output ─────────────────────────────────────────────────────────────
     println!("{}", report::render_summary(&consensus));
 
-    // Always write the report — even on PASS, findings (LOW/INFO) are useful.
+    let output_path = cli.output.unwrap_or_else(|| cli.source_root.join("review-report.md"));
     let report_md = report::render_report(&consensus);
-    std::fs::write(&cli.output, &report_md)
-        .with_context(|| format!("Cannot write report to {}", cli.output.display()))?;
+    std::fs::write(&output_path, &report_md)
+        .with_context(|| format!("Cannot write report to {}", output_path.display()))?;
+
     if consensus.gate_passed {
         println!(
             "[ai-reviewer] Gate PASSED — full report: {}",
-            cli.output.display()
+            output_path.display()
         );
     } else {
         eprintln!(
             "[ai-reviewer] Gate FAILED — report written to: {}",
-            cli.output.display()
+            output_path.display()
         );
     }
 
     Ok(consensus.gate_passed)
 }
 
+// ── Provider builder ───────────────────────────────────────────────────────────
+
+fn build_reviewer(
+    kind: ProviderKind,
+    api_key: String,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    max_retries: u32,
+    focus: ReviewFocus,
+) -> Result<Box<dyn Reviewer>> {
+    match kind {
+        ProviderKind::Minimax => {
+            let url = base_url.unwrap_or_else(|| "https://api.minimax.chat/v1".into());
+            let mid = model_id.unwrap_or_else(|| "MiniMax-M2.5".into());
+            let client = openai::Client::from_url(&api_key, &url);
+            let model = client.completion_model(&mid);
+            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus)))
+        }
+        ProviderKind::Deepseek => {
+            let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
+            let client = if let Some(url) = base_url {
+                deepseek::Client::from_url(&api_key, &url)
+            } else {
+                deepseek::Client::new(&api_key)
+            };
+            let model = client.completion_model(&mid);
+            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus)))
+        }
+        ProviderKind::Anthropic => {
+            let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
+            let base = base_url.unwrap_or_else(|| "https://api.anthropic.com".into());
+            let client = anthropic::Client::new(&api_key, &base, None, "2023-06-01");
+            let model = client.completion_model(&mid);
+            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus)))
+        }
+        ProviderKind::Gemini => {
+            let mid = model_id.unwrap_or_else(|| "gemini-2.0-flash".into());
+            let client = gemini::Client::new(&api_key);
+            let model = client.completion_model(&mid);
+            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus)))
+        }
+        ProviderKind::Openai => {
+            let mid = model_id.unwrap_or_else(|| "gpt-4o".into());
+            let client = if let Some(url) = base_url {
+                openai::Client::from_url(&api_key, &url)
+            } else {
+                openai::Client::new(&api_key)
+            };
+            let model = client.completion_model(&mid);
+            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus)))
+        }
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/// Resolve an API key: prefer explicit arg/env, then fall back to legacy env var.
+fn resolve_api_key(
+    explicit: Option<&str>,
+    _primary_env: &str,
+    legacy_env: &str,
+) -> Result<String> {
+    if let Some(k) = explicit {
+        return Ok(k.to_owned());
+    }
+    std::env::var(legacy_env)
+        .with_context(|| format!("API key not set (tried {legacy_env})"))
+}
 
 fn read_diff(path: &str) -> Result<String> {
     if path == "-" {
@@ -219,26 +426,22 @@ fn read_diff(path: &str) -> Result<String> {
     }
 }
 
-/// Extract the portion of the unified diff that belongs to a specific file,
-/// identified by the `+++ b/<path>` header.  Falls back to the full diff
-/// text if the file header is not found.
+/// Extract the portion of the unified diff that belongs to a specific file.
 fn extract_file_diff_chunk(full_diff: &str, fd: &diff::FileDiff) -> String {
     let target = match fd.source_path() {
         Some(p) => p.display().to_string(),
         None => return String::new(),
     };
 
-    let mut lines = full_diff.lines().peekable();
+    let lines = full_diff.lines().peekable();
     let mut chunk = String::new();
     let mut capturing = false;
 
-    while let Some(line) = lines.next() {
+    for line in lines {
         if line.starts_with("diff --git ") {
             if capturing {
-                // Reached next file — stop
                 break;
             }
-            // Check if this is our target file
             if line.contains(&target) {
                 capturing = true;
             }
@@ -250,7 +453,6 @@ fn extract_file_diff_chunk(full_diff: &str, fd: &diff::FileDiff) -> String {
     }
 
     if chunk.is_empty() {
-        // Best-effort: return the full diff
         full_diff.to_owned()
     } else {
         chunk

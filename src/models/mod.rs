@@ -1,7 +1,9 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-pub mod deepseek;
-pub mod minimax;
+pub mod reviewer;
+
+pub use crate::prompt::ReviewFocus;
 
 // ── Core verdict / severity types ────────────────────────────────────────────
 
@@ -65,7 +67,7 @@ pub struct Finding {
 /// The structured response every reviewer model must produce.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReviewResult {
-    /// e.g. "minimax-text-01" or "deepseek-reasoner"
+    /// Human-readable label, e.g. "MiniMax" or "DeepSeek"
     pub model_id: String,
     pub verdict: Verdict,
     /// 0.0 – 1.0 — must be >= CONFIDENCE_THRESHOLD to pass the gate
@@ -75,14 +77,39 @@ pub struct ReviewResult {
     pub reasoning: String,
 }
 
-/// Final output of the consensus engine.
+/// Consensus result for a single reviewer pair (Style or Logic).
+#[derive(Debug, Serialize)]
+pub struct PairResult {
+    pub focus: String,
+    pub label_a: String,
+    pub label_b: String,
+    pub result_a: ReviewResult,
+    pub result_b: ReviewResult,
+    pub merged_findings: Vec<Finding>,
+    pub pair_passed: bool,
+}
+
+/// Final output of the consensus engine combining both pairs.
 #[derive(Debug, Serialize)]
 pub struct ConsensusResult {
     pub verdict: Verdict,
-    pub minimax_result: ReviewResult,
-    pub deepseek_result: ReviewResult,
-    pub merged_findings: Vec<Finding>,
+    pub pair_style: PairResult,
+    pub pair_logic: PairResult,
+    /// All findings from both pairs, merged and deduplicated.
+    pub all_findings: Vec<Finding>,
     pub gate_passed: bool,
+}
+
+// ── Reviewer trait ────────────────────────────────────────────────────────────
+
+#[async_trait]
+pub trait Reviewer: Send + Sync {
+    fn label(&self) -> &str;
+    async fn review(
+        &self,
+        contexts: &[crate::ast::FileAstContext],
+        policy_text: &str,
+    ) -> Result<ReviewResult, ReviewError>;
 }
 
 // ── JSON Schema embedded in system prompt ─────────────────────────────────────
@@ -124,11 +151,8 @@ pub const REVIEW_JSON_SCHEMA: &str = r#"{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReviewError {
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("API error {status}: {body}")]
-    Api { status: u16, body: String },
+    #[error("Completion error: {0}")]
+    Completion(String),
 
     #[error("Max retries ({attempts}) exceeded. Last parse error: {parse_error}\nRaw response:\n{raw}")]
     MaxRetriesExceeded {
@@ -136,7 +160,4 @@ pub enum ReviewError {
         parse_error: String,
         raw: String,
     },
-
-    #[error("Response contained no text content")]
-    EmptyResponse,
 }

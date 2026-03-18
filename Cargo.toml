@@ -2,7 +2,7 @@
 name = "ai-reviewer"
 version = "0.1.0"
 edition = "2024"
-description = "Production-grade AI-to-AI code review CLI: MiniMax (Anthropic-compat) x DeepSeek (OpenAI-compat) cross-validation"
+description = "Production-grade AI-to-AI code review CLI with multi-provider support via Rig"
 default-run = "ai-reviewer"
 
 [[bin]]
@@ -20,9 +20,10 @@ tree-sitter-python   = "0.23"  # Python grammar (extensible)
 streaming-iterator   = "0.1"   # required by tree-sitter QueryMatches
 diffy                = "0.4"   # unified diff parser
 
-# ── Async runtime & HTTP ─────────────────────────────────────────────────────
-tokio   = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# ── Async runtime & AI providers ─────────────────────────────────────────────
+tokio       = { version = "1", features = ["full"] }
+rig-core    = "0.9"
+async-trait = "0.1"
 
 # ── Serialisation & error handling ───────────────────────────────────────────
 serde      = { version = "1", features = ["derive"] }
@@ -31,9 +32,8 @@ anyhow     = { version = "1", features = ["backtrace"] }
 thiserror  = "2"
 
 # ── Utilities ────────────────────────────────────────────────────────────────
-futures      = "0.3"
-chrono       = { version = "0.4", features = ["serde"] }
-tracing      = "0.1"
+chrono             = { version = "0.4", features = ["serde"] }
+tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]

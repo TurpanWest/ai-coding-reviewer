@@ -334,7 +334,7 @@ fn find_node_at_lines<'a>(root: Node<'a>, start_line: u32, end_line: u32) -> Opt
         let ne = node.end_position().row;
 
         if ns <= start_row && ne >= end_row {
-            let is_smaller = best.map_or(true, |b: Node<'_>| {
+            let is_smaller = best.is_none_or(|b: Node<'_>| {
                 (ne - ns) < (b.end_position().row - b.start_position().row)
             });
             if is_smaller {

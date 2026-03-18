@@ -1,48 +1,79 @@
 use std::collections::HashMap;
 
-use crate::models::{CodeLocation, ConsensusResult, Finding, ReviewError, ReviewResult, Severity, Verdict};
+use crate::models::{
+    CodeLocation, ConsensusResult, Finding, PairResult, ReviewError, ReviewFocus, ReviewResult,
+    Severity, Verdict,
+};
 
 // ── Gate threshold ────────────────────────────────────────────────────────────
 
 pub const CONFIDENCE_THRESHOLD: f64 = 0.90;
 
-// ── Main consensus logic ──────────────────────────────────────────────────────
+// ── Pair-level consensus ──────────────────────────────────────────────────────
 
-/// Evaluate two model results and produce a final consensus verdict.
+/// Evaluate a single reviewer pair (Style or Logic) and produce a `PairResult`.
 ///
-/// The gate passes **only** when:
+/// The pair passes only when:
 /// 1. Both models' confidence >= `CONFIDENCE_THRESHOLD`
 /// 2. Both models agree on a `Pass` verdict
-///
-/// In every other case the gate fails and the merged findings are reported.
-pub fn evaluate(
-    minimax_res:  Result<ReviewResult, ReviewError>,
-    deepseek_res: Result<ReviewResult, ReviewError>,
-) -> ConsensusResult {
-    let minimax  = unwrap_or_fail(minimax_res,  "minimax");
-    let deepseek = unwrap_or_fail(deepseek_res, "deepseek-chat");
+pub fn evaluate_pair(
+    res_a: Result<ReviewResult, ReviewError>,
+    res_b: Result<ReviewResult, ReviewError>,
+    label_a: String,
+    label_b: String,
+    focus: ReviewFocus,
+) -> PairResult {
+    let result_a = unwrap_or_fail(res_a, &label_a);
+    let result_b = unwrap_or_fail(res_b, &label_b);
 
-    let both_confident = minimax.confidence  >= CONFIDENCE_THRESHOLD
-                      && deepseek.confidence >= CONFIDENCE_THRESHOLD;
+    let both_confident = result_a.confidence >= CONFIDENCE_THRESHOLD
+        && result_b.confidence >= CONFIDENCE_THRESHOLD;
 
-    let verdicts_agree = matches!(
-        (&minimax.verdict, &deepseek.verdict),
-        (Verdict::Pass, Verdict::Pass) | (Verdict::Fail, Verdict::Fail)
-    );
+    let both_pass = matches!(result_a.verdict, Verdict::Pass)
+        && matches!(result_b.verdict, Verdict::Pass);
 
-    let gate_passed = both_confident
-        && verdicts_agree
-        && matches!(minimax.verdict, Verdict::Pass);
+    let pair_passed = both_confident && both_pass;
 
+    let merged_findings = merge_and_dedup(&result_a.findings, &result_b.findings);
+
+    let focus_label = match focus {
+        ReviewFocus::Style => "style".to_owned(),
+        ReviewFocus::Logic => "logic".to_owned(),
+    };
+
+    PairResult {
+        focus: focus_label,
+        label_a,
+        label_b,
+        result_a,
+        result_b,
+        merged_findings,
+        pair_passed,
+    }
+}
+
+// ── Final consensus ───────────────────────────────────────────────────────────
+
+/// Combine both pair results into the overall `ConsensusResult`.
+/// The gate passes only when **both pairs** pass.
+pub fn evaluate(style_pair: PairResult, logic_pair: PairResult) -> ConsensusResult {
+    let gate_passed = style_pair.pair_passed && logic_pair.pair_passed;
     let verdict = if gate_passed { Verdict::Pass } else { Verdict::Fail };
 
-    let merged_findings = merge_and_dedup(&minimax.findings, &deepseek.findings);
+    let all_findings = merge_and_dedup(
+        &[
+            style_pair.merged_findings.as_slice(),
+            logic_pair.merged_findings.as_slice(),
+        ]
+        .concat(),
+        &[],
+    );
 
     ConsensusResult {
         verdict,
-        minimax_result:  minimax,
-        deepseek_result: deepseek,
-        merged_findings,
+        pair_style: style_pair,
+        pair_logic: logic_pair,
+        all_findings,
         gate_passed,
     }
 }
@@ -53,31 +84,38 @@ pub fn gate_failure_reason(result: &ConsensusResult) -> String {
         return "Gate passed.".into();
     }
 
-    let m = &result.minimax_result;
-    let d = &result.deepseek_result;
-
     let mut reasons: Vec<String> = Vec::new();
 
-    if m.confidence < CONFIDENCE_THRESHOLD {
-        reasons.push(format!(
-            "MiniMax confidence too low ({:.2} < {:.2})",
-            m.confidence, CONFIDENCE_THRESHOLD
-        ));
-    }
-    if d.confidence < CONFIDENCE_THRESHOLD {
-        reasons.push(format!(
-            "DeepSeek confidence too low ({:.2} < {:.2})",
-            d.confidence, CONFIDENCE_THRESHOLD
-        ));
-    }
-    if m.verdict != d.verdict {
-        reasons.push(format!(
-            "Verdict conflict: MiniMax={} vs DeepSeek={}",
-            m.verdict, d.verdict
-        ));
-    }
-    if matches!(m.verdict, Verdict::Fail) && matches!(d.verdict, Verdict::Fail) {
-        reasons.push("Both models confirmed defects".into());
+    for pair in [&result.pair_style, &result.pair_logic] {
+        if !pair.pair_passed {
+            let a = &pair.result_a;
+            let b = &pair.result_b;
+            let la = &pair.label_a;
+            let lb = &pair.label_b;
+            let focus = pair.focus.to_uppercase();
+
+            if a.confidence < CONFIDENCE_THRESHOLD {
+                reasons.push(format!(
+                    "[{focus}] {la} confidence too low ({:.2} < {:.2})",
+                    a.confidence, CONFIDENCE_THRESHOLD
+                ));
+            }
+            if b.confidence < CONFIDENCE_THRESHOLD {
+                reasons.push(format!(
+                    "[{focus}] {lb} confidence too low ({:.2} < {:.2})",
+                    b.confidence, CONFIDENCE_THRESHOLD
+                ));
+            }
+            if a.verdict != b.verdict {
+                reasons.push(format!(
+                    "[{focus}] Verdict conflict: {la}={} vs {lb}={}",
+                    a.verdict, b.verdict
+                ));
+            }
+            if matches!(a.verdict, Verdict::Fail) && matches!(b.verdict, Verdict::Fail) {
+                reasons.push(format!("[{focus}] Both models confirmed defects"));
+            }
+        }
     }
 
     if reasons.is_empty() {
@@ -89,12 +127,10 @@ pub fn gate_failure_reason(result: &ConsensusResult) -> String {
 
 // ── Finding deduplication ─────────────────────────────────────────────────────
 
-/// Merge findings from both models.  Two findings are considered duplicates if
-/// they share the same `file` + `line_start` + `rule_id`.  When duplicates
-/// exist the one with higher severity is kept; the other's description is
-/// appended as context.
+/// Merge findings from two slices.  Two findings are duplicates if they share
+/// the same `file` + `line_start` + `rule_id`.  When duplicates exist the one
+/// with higher severity is kept; the other's description is appended as context.
 fn merge_and_dedup(a: &[Finding], b: &[Finding]) -> Vec<Finding> {
-    // Key: (file, line_start, rule_id)
     let mut map: HashMap<(String, u32, String), Finding> = HashMap::new();
 
     for finding in a.iter().chain(b.iter()) {
@@ -105,11 +141,9 @@ fn merge_and_dedup(a: &[Finding], b: &[Finding]) -> Vec<Finding> {
         );
         map.entry(key)
             .and_modify(|existing| {
-                // Keep the higher severity
                 if severity_rank(&finding.severity) > severity_rank(&existing.severity) {
                     existing.severity = finding.severity.clone();
                 }
-                // Merge descriptions if they differ
                 if existing.description != finding.description {
                     existing.description = format!(
                         "{} | [alt] {}",
@@ -120,7 +154,6 @@ fn merge_and_dedup(a: &[Finding], b: &[Finding]) -> Vec<Finding> {
             .or_insert_with(|| finding.clone());
     }
 
-    // Sort: CRITICAL first, then by file + line
     let mut findings: Vec<Finding> = map.into_values().collect();
     findings.sort_by(|a, b| {
         severity_rank(&b.severity)
@@ -134,40 +167,34 @@ fn merge_and_dedup(a: &[Finding], b: &[Finding]) -> Vec<Finding> {
 fn severity_rank(s: &Severity) -> u8 {
     match s {
         Severity::Critical => 5,
-        Severity::High     => 4,
-        Severity::Medium   => 3,
-        Severity::Low      => 2,
-        Severity::Info     => 1,
+        Severity::High => 4,
+        Severity::Medium => 3,
+        Severity::Low => 2,
+        Severity::Info => 1,
     }
 }
 
 // ── Error → synthetic ReviewResult ───────────────────────────────────────────
 
-/// Convert a `ReviewError` into a synthetic `ReviewResult` that represents a
-/// hard failure, so that the consensus engine always has two results to work
-/// with regardless of network/parse errors.
-fn unwrap_or_fail(
-    res:      Result<ReviewResult, ReviewError>,
-    model_id: &str,
-) -> ReviewResult {
+fn unwrap_or_fail(res: Result<ReviewResult, ReviewError>, label: &str) -> ReviewResult {
     match res {
         Ok(r) => r,
         Err(e) => {
             let description = format!("Reviewer error: {e}");
             ReviewResult {
-                model_id:   model_id.to_owned(),
-                verdict:    Verdict::Fail,
-                confidence: 1.0, // We are 100% confident that an error = block
-                findings:   vec![Finding {
-                    severity:    Severity::Critical,
-                    location:    CodeLocation {
-                        file:       "<reviewer-error>".into(),
+                model_id: label.to_owned(),
+                verdict: Verdict::Fail,
+                confidence: 1.0,
+                findings: vec![Finding {
+                    severity: Severity::Critical,
+                    location: CodeLocation {
+                        file: "<reviewer-error>".into(),
                         line_start: 0,
-                        line_end:   0,
+                        line_end: 0,
                     },
-                    rule_id:     "INTERNAL-001".into(),
+                    rule_id: "INTERNAL-001".into(),
                     description,
-                    suggestion:  "Check reviewer logs and API key configuration.".into(),
+                    suggestion: "Check reviewer logs and API key configuration.".into(),
                 }],
                 reasoning: format!("Reviewer failed to produce a valid result: {e}"),
             }

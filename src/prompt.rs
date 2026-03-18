@@ -1,6 +1,17 @@
 use crate::ast::{CallEdge, FileAstContext, Symbol, SymbolKind};
 use crate::models::REVIEW_JSON_SCHEMA;
 
+// ── Review focus ──────────────────────────────────────────────────────────────
+
+/// Determines which category of issues a reviewer is assigned to analyse.
+#[derive(Debug, Clone, Copy)]
+pub enum ReviewFocus {
+    /// Naming, readability, formatting, dead code, documentation.
+    Style,
+    /// Type errors, logic defects, security, data races, regressions.
+    Logic,
+}
+
 // ── System prompt (cached portion) ───────────────────────────────────────────
 
 /// Build the **system prompt** that will be submitted with `cache_control:
@@ -8,15 +19,29 @@ use crate::models::REVIEW_JSON_SCHEMA;
 ///
 /// This is the large, stable part that gets cached between requests.
 /// `policy_text` is the raw Markdown content of the security/coding policy file.
-pub fn build_system_prompt(policy_text: &str) -> String {
+pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
+    let focus_section = match focus {
+        ReviewFocus::Style => {
+            "## Your Assigned Focus: CODE STYLE\n\
+             Review ONLY for: naming conventions, code clarity, readability, formatting,\n\
+             dead code, unnecessary complexity, documentation gaps.\n\
+             Do NOT report logic bugs, type errors, or security issues — those are handled by another reviewer.\n\n"
+        }
+        ReviewFocus::Logic => {
+            "## Your Assigned Focus: LOGIC & CORRECTNESS\n\
+             Review ONLY for: type errors, logic defects, null dereferences, API misuse,\n\
+             security vulnerabilities, data races, silent failures, regressions.\n\
+             Do NOT report style/naming issues — those are handled by another reviewer.\n\n"
+        }
+    };
+
     format!(
-        r#"You are a ruthless, expert security and correctness code reviewer operating inside a fully automated CI/CD pipeline.
+        r#"{focus_section}You are a ruthless, expert security and correctness code reviewer operating inside a fully automated CI/CD pipeline.
 There are no human reviewers in this loop. Your findings directly gate production deployments.
 
 ## Your Mission
 Analyse the provided code diff and its surrounding AST context with extreme rigour.
-Detect every security vulnerability, logic error, data race, resource leak, API misuse,
-and violation of the policies below. Be brutally honest — false negatives are catastrophic.
+Detect every issue within your assigned focus area above. Be brutally honest — false negatives are catastrophic.
 
 ## Company Security & Coding Policy
 {policy_text}
@@ -53,6 +78,7 @@ Field semantics:
 3. If you find NO issues, still produce the JSON with `findings: []` and an honest confidence score.
 4. `line_start` and `line_end` must refer to line numbers in the NEW version of the file.
 "#,
+        focus_section = focus_section,
         policy_text = policy_text,
         REVIEW_JSON_SCHEMA = REVIEW_JSON_SCHEMA,
     )
