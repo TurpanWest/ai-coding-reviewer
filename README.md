@@ -36,8 +36,8 @@ Powered by [rig-core](https://github.com/0xPlaygrounds/rig). Any of the four rev
 | MiniMax | `minimax` | `MiniMax-M2.7` |
 | DeepSeek | `deepseek` | `deepseek-chat` |
 | Anthropic | `anthropic` | `claude-sonnet-4-6` |
-| Google Gemini | `gemini` | `gemini-2.0-flash` |
-| OpenAI | `openai` | `gpt-4o` |
+| Google Gemini | `gemini` | `gemini-3.1-pro-preview` |
+| OpenAI | `openai` | `gpt-5.4` |
 
 ---
 

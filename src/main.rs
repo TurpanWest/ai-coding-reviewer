@@ -407,13 +407,13 @@ fn build_reviewer(
             Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Gemini => {
-            let mid = model_id.unwrap_or_else(|| "gemini-2.0-flash".into());
+            let mid = model_id.unwrap_or_else(|| "gemini-3.1-pro-preview".into());
             let client = gemini::Client::new(&api_key);
             let model = client.completion_model(&mid);
             Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Openai => {
-            let mid = model_id.unwrap_or_else(|| "gpt-4o".into());
+            let mid = model_id.unwrap_or_else(|| "gpt-5.4".into());
             let client = if let Some(url) = base_url {
                 openai::Client::from_url(&api_key, &url)
             } else {
