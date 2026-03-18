@@ -379,7 +379,7 @@ fn build_reviewer(
     model_id: Option<String>,
     max_retries: u32,
     focus: ReviewFocus,
-    timeout_secs: u64,
+    reviewer_timeout: u64,
 ) -> Result<Box<dyn Reviewer>> {
     match kind {
         ProviderKind::Minimax => {
@@ -387,7 +387,7 @@ fn build_reviewer(
             let mid = model_id.unwrap_or_else(|| "MiniMax-M2.5".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, timeout_secs)))
+            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Deepseek => {
             let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
@@ -397,20 +397,20 @@ fn build_reviewer(
                 deepseek::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, timeout_secs)))
+            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Anthropic => {
             let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
             let base = base_url.unwrap_or_else(|| "https://api.anthropic.com".into());
             let client = anthropic::Client::new(&api_key, &base, None, "2023-06-01");
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, timeout_secs)))
+            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Gemini => {
             let mid = model_id.unwrap_or_else(|| "gemini-2.0-flash".into());
             let client = gemini::Client::new(&api_key);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, timeout_secs)))
+            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout)))
         }
         ProviderKind::Openai => {
             let mid = model_id.unwrap_or_else(|| "gpt-4o".into());
@@ -420,7 +420,7 @@ fn build_reviewer(
                 openai::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, timeout_secs)))
+            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout)))
         }
     }
 }
@@ -431,7 +431,7 @@ fn parse_threshold(s: &str) -> Result<f64, String> {
     let v: f64 = s.parse().map_err(|_| format!("'{s}' is not a valid number"))?;
     if !(0.0..=1.0).contains(&v) {
         return Err(format!(
-            "threshold must be between 0.0 and 1.0, got {v}"
+            "threshold must be between 0.0 and 1.0, got '{s}' ({v})"
         ));
     }
     Ok(v)

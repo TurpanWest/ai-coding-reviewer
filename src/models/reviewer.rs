@@ -78,7 +78,10 @@ where
             // Delay = 2^(attempt-1) * 1000ms, capped at 16s.
             // This gives: attempt 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s …
             if attempt > 0 {
-                let delay_ms = (1000u64 << (attempt - 1)).min(16_000);
+                let delay_ms = 1000u64
+                    .checked_shl(attempt - 1)
+                    .unwrap_or(u64::MAX)
+                    .min(16_000);
                 debug!(attempt, delay_ms, label = %self.label, "Backoff before retry");
                 sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -170,14 +173,15 @@ fn strip_think_block(raw: &str) -> &str {
         }
     }
 
-    // Case 2: truncated think block — find the last top-level `{` that starts
-    // a JSON object (heuristic: last `{` not preceded by another `{`).
-    // This recovers JSON embedded or appended after a think block without a
-    // proper closing tag.
-    if raw.contains("<think>")
-        && let Some(brace_pos) = raw.rfind('{')
+    // Case 2: truncated think block — scan forward from where `<think>` ends
+    // looking for a `{` that starts the JSON object.  We use `find` (first
+    // occurrence after the opening tag) rather than `rfind` to avoid picking
+    // up a stray `{` deep inside the analysis text or code snippets quoted
+    // inside the think block.  Best-effort heuristic only.
+    if let Some(open_pos) = raw.find("<think>")
+        && let Some(brace_offset) = raw[open_pos..].find("\n{")
     {
-        let candidate = raw[brace_pos..].trim();
+        let candidate = raw[open_pos + brace_offset + 1..].trim();
         if !candidate.is_empty() {
             return candidate;
         }
