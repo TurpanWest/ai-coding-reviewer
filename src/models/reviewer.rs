@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rig::completion::{Chat, CompletionModel};
-use rig::message::Message;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, warn};
 
@@ -58,17 +57,17 @@ where
         let user_prompt = build_user_prompt(contexts);
 
         // Build a lightweight agent with the system prompt as its preamble.
-        // Agent<M> implements the `Chat` trait, which gives us multi-turn
-        // conversation history for the self-correction retry loop.
         let agent = rig::agent::AgentBuilder::new(self.model.clone())
             .preamble(&system_prompt)
             .build();
 
-        // history accumulates the full prior conversation for correction rounds.
-        // On attempt 0: history is empty, current_prompt is the initial user prompt.
-        // On attempt N: history has [user, assistant, user, assistant, …] pairs,
-        //               current_prompt is the latest correction message.
-        let mut history: Vec<Message> = vec![];
+        // history is kept empty for every call. build_correction_prompt embeds
+        // the original user prompt, the bad response, the parse error, and the
+        // schema inline, so each attempt is fully self-contained.
+        //
+        // Passing accumulated history causes rig-core to serialize assistant
+        // messages with `"tool_calls": []`, which DeepSeek (and other
+        // OpenAI-compat providers) reject with a 400 invalid_request_error.
         let mut current_prompt = user_prompt.clone();
         let mut last_raw = String::new();
         let mut last_error = String::new();
@@ -93,7 +92,7 @@ where
             // consensus engine can handle it as a synthetic FAIL.
             let chat_result = timeout(
                 Duration::from_secs(self.timeout_secs),
-                agent.chat(current_prompt.clone(), history.clone()),
+                agent.chat(current_prompt.clone(), vec![]),
             )
             .await;
 
@@ -130,10 +129,6 @@ where
                     if attempt >= self.max_retries {
                         break;
                     }
-
-                    // Append the failed exchange so the model has full context.
-                    history.push(Message::user(current_prompt.clone()));
-                    history.push(Message::assistant(raw.clone()));
 
                     current_prompt = build_correction_prompt(
                         &user_prompt,
