@@ -52,7 +52,7 @@ struct Cli {
     policy: PathBuf,
 
     /// Confidence gate threshold (0.0–1.0)
-    #[arg(short = 't', long, default_value_t = 0.90)]
+    #[arg(short = 't', long, default_value_t = 0.90, value_parser = parse_threshold)]
     threshold: f64,
 
     /// Output path for the Markdown review report (defaults to <source-root>/review-report.md)
@@ -62,6 +62,16 @@ struct Cli {
     /// Maximum self-correction retries per model
     #[arg(long, default_value_t = 3)]
     max_retries: u32,
+
+    /// Hard timeout in seconds per individual LLM call (not per retry loop).
+    /// If a reviewer hangs longer than this, it is treated as a FAIL.
+    #[arg(long, default_value_t = 120, env = "REVIEWER_TIMEOUT")]
+    reviewer_timeout: u64,
+
+    /// Maximum number of lines in the diff before refusing to process.
+    /// Large diffs silently exceed LLM context windows; fail fast instead.
+    #[arg(long, default_value_t = 5000, env = "MAX_DIFF_LINES")]
+    max_diff_lines: usize,
 
     // ── Style pair: Reviewer 1 ─────────────────────────────────────────────────
 
@@ -181,6 +191,18 @@ async fn run() -> Result<bool> {
         "Inputs loaded"
     );
 
+    // ── Guard: diff size limit ──────────────────────────────────────────────
+    let diff_lines = diff_text.lines().count();
+    if diff_lines > cli.max_diff_lines {
+        anyhow::bail!(
+            "Diff has {diff_lines} lines which exceeds --max-diff-lines limit of {}.\n\
+             Large diffs exceed LLM context windows and produce unreliable verdicts.\n\
+             Split the diff into smaller per-module chunks before reviewing.",
+            cli.max_diff_lines
+        );
+    }
+    info!(diff_lines, limit = cli.max_diff_lines, "Diff size check passed");
+
     // ── Parse diff ─────────────────────────────────────────────────────────
     let file_diffs = diff::parse_diff(&diff_text).context("Failed to parse unified diff")?;
 
@@ -245,6 +267,7 @@ async fn run() -> Result<bool> {
         cli.reviewer_1_model.clone(),
         cli.max_retries,
         ReviewFocus::Style,
+        cli.reviewer_timeout,
     )
     .context("Failed to build style reviewer A")?;
 
@@ -255,6 +278,7 @@ async fn run() -> Result<bool> {
         cli.reviewer_2_model.clone(),
         cli.max_retries,
         ReviewFocus::Style,
+        cli.reviewer_timeout,
     )
     .context("Failed to build style reviewer B")?;
 
@@ -265,6 +289,7 @@ async fn run() -> Result<bool> {
         cli.reviewer_3_model.clone(),
         cli.max_retries,
         ReviewFocus::Logic,
+        cli.reviewer_timeout,
     )
     .context("Failed to build logic reviewer A")?;
 
@@ -275,6 +300,7 @@ async fn run() -> Result<bool> {
         cli.reviewer_4_model.clone(),
         cli.max_retries,
         ReviewFocus::Logic,
+        cli.reviewer_timeout,
     )
     .context("Failed to build logic reviewer B")?;
 
@@ -353,6 +379,7 @@ fn build_reviewer(
     model_id: Option<String>,
     max_retries: u32,
     focus: ReviewFocus,
+    timeout_secs: u64,
 ) -> Result<Box<dyn Reviewer>> {
     match kind {
         ProviderKind::Minimax => {
@@ -360,7 +387,7 @@ fn build_reviewer(
             let mid = model_id.unwrap_or_else(|| "MiniMax-M2.5".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus)))
+            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, timeout_secs)))
         }
         ProviderKind::Deepseek => {
             let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
@@ -370,20 +397,20 @@ fn build_reviewer(
                 deepseek::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus)))
+            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, timeout_secs)))
         }
         ProviderKind::Anthropic => {
             let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
             let base = base_url.unwrap_or_else(|| "https://api.anthropic.com".into());
             let client = anthropic::Client::new(&api_key, &base, None, "2023-06-01");
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus)))
+            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, timeout_secs)))
         }
         ProviderKind::Gemini => {
             let mid = model_id.unwrap_or_else(|| "gemini-2.0-flash".into());
             let client = gemini::Client::new(&api_key);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus)))
+            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, timeout_secs)))
         }
         ProviderKind::Openai => {
             let mid = model_id.unwrap_or_else(|| "gpt-4o".into());
@@ -393,9 +420,21 @@ fn build_reviewer(
                 openai::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus)))
+            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, timeout_secs)))
         }
     }
+}
+
+// ── CLI validators ─────────────────────────────────────────────────────────────
+
+fn parse_threshold(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("'{s}' is not a valid number"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!(
+            "threshold must be between 0.0 and 1.0, got {v}"
+        ));
+    }
+    Ok(v)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

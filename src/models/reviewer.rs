@@ -3,9 +3,12 @@
 /// A single `LlmReviewer<M>` replaces the old `MinimaxReviewer` and
 /// `DeepSeekReviewer` hand-rolled HTTP clients.  It works with any provider
 /// that Rig supports (OpenAI, DeepSeek, Anthropic, Gemini, …).
+use std::time::Duration;
+
 use async_trait::async_trait;
 use rig::completion::{Chat, CompletionModel};
 use rig::message::Message;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, warn};
 
 use crate::ast::FileAstContext;
@@ -19,11 +22,19 @@ pub struct LlmReviewer<M: CompletionModel> {
     label: String,
     max_retries: u32,
     focus: ReviewFocus,
+    /// Hard wall-clock timeout per individual LLM call (not per retry loop).
+    timeout_secs: u64,
 }
 
 impl<M: CompletionModel + Clone> LlmReviewer<M> {
-    pub fn new(model: M, label: impl Into<String>, max_retries: u32, focus: ReviewFocus) -> Self {
-        Self { model, label: label.into(), max_retries, focus }
+    pub fn new(
+        model: M,
+        label: impl Into<String>,
+        max_retries: u32,
+        focus: ReviewFocus,
+        timeout_secs: u64,
+    ) -> Self {
+        Self { model, label: label.into(), max_retries, focus, timeout_secs }
     }
 }
 
@@ -63,12 +74,38 @@ where
         let mut last_error = String::new();
 
         for attempt in 0..=self.max_retries {
+            // Exponential backoff before every retry (not before the first attempt).
+            // Delay = 2^(attempt-1) * 1000ms, capped at 16s.
+            // This gives: attempt 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s …
+            if attempt > 0 {
+                let delay_ms = (1000u64 << (attempt - 1)).min(16_000);
+                debug!(attempt, delay_ms, label = %self.label, "Backoff before retry");
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+
             debug!(attempt, label = %self.label, "Review attempt");
 
-            let raw = agent
-                .chat(current_prompt.clone(), history.clone())
-                .await
-                .map_err(|e| ReviewError::Completion(e.to_string()))?;
+            // Hard per-call timeout: if the LLM hangs, we don't block the CI
+            // worker forever — we convert the timeout into a ReviewError so the
+            // consensus engine can handle it as a synthetic FAIL.
+            let chat_result = timeout(
+                Duration::from_secs(self.timeout_secs),
+                agent.chat(current_prompt.clone(), history.clone()),
+            )
+            .await;
+
+            let raw = match chat_result {
+                Err(_elapsed) => {
+                    let msg = format!(
+                        "Timeout after {}s waiting for LLM response",
+                        self.timeout_secs
+                    );
+                    warn!(attempt, label = %self.label, timeout_secs = self.timeout_secs, "LLM call timed out");
+                    return Err(ReviewError::Completion(msg));
+                }
+                Ok(Err(e)) => return Err(ReviewError::Completion(e.to_string())),
+                Ok(Ok(raw)) => raw,
+            };
 
             last_raw = raw.clone();
             let cleaned = strip_json_fences(strip_think_block(&raw));
@@ -121,8 +158,8 @@ where
 /// Handles two cases:
 /// 1. Normal: `<think>…</think>\n{json}` — extracts content after closing tag.
 /// 2. Truncated: model hit token limit inside the think block, no closing tag,
-///    but a JSON object was embedded — scan for the first `{` at the outermost
-///    level and return from there.  If nothing is found, return `raw` unchanged.
+///    but a JSON object was embedded — scan for the last `{` and return from
+///    there.  If nothing is found, return `raw` unchanged.
 fn strip_think_block(raw: &str) -> &str {
     // Case 1: well-formed closing tag followed by content
     if let Some(end_pos) = raw.rfind("</think>") {
