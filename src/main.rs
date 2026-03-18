@@ -433,7 +433,7 @@ fn extract_file_diff_chunk(full_diff: &str, fd: &diff::FileDiff) -> String {
         None => return String::new(),
     };
 
-    let lines = full_diff.lines().peekable();
+    let lines = full_diff.lines();
     let mut chunk = String::new();
     let mut capturing = false;
 

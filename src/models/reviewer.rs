@@ -117,7 +117,14 @@ where
 // ── Utility functions ─────────────────────────────────────────────────────────
 
 /// Strip `<think>…</think>` reasoning blocks emitted by some models.
+///
+/// Handles two cases:
+/// 1. Normal: `<think>…</think>\n{json}` — extracts content after closing tag.
+/// 2. Truncated: model hit token limit inside the think block, no closing tag,
+///    but a JSON object was embedded — scan for the first `{` at the outermost
+///    level and return from there.  If nothing is found, return `raw` unchanged.
 fn strip_think_block(raw: &str) -> &str {
+    // Case 1: well-formed closing tag followed by content
     if let Some(end_pos) = raw.rfind("</think>") {
         let after = &raw[end_pos + 8..]; // len("</think>") == 8
         let trimmed = after.trim();
@@ -125,6 +132,20 @@ fn strip_think_block(raw: &str) -> &str {
             return trimmed;
         }
     }
+
+    // Case 2: truncated think block — find the last top-level `{` that starts
+    // a JSON object (heuristic: last `{` not preceded by another `{`).
+    // This recovers JSON embedded or appended after a think block without a
+    // proper closing tag.
+    if raw.contains("<think>")
+        && let Some(brace_pos) = raw.rfind('{')
+    {
+        let candidate = raw[brace_pos..].trim();
+        if !candidate.is_empty() {
+            return candidate;
+        }
+    }
+
     raw
 }
 

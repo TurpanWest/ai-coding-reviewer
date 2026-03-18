@@ -60,14 +60,7 @@ pub fn evaluate(style_pair: PairResult, logic_pair: PairResult) -> ConsensusResu
     let gate_passed = style_pair.pair_passed && logic_pair.pair_passed;
     let verdict = if gate_passed { Verdict::Pass } else { Verdict::Fail };
 
-    let all_findings = merge_and_dedup(
-        &[
-            style_pair.merged_findings.as_slice(),
-            logic_pair.merged_findings.as_slice(),
-        ]
-        .concat(),
-        &[],
-    );
+    let all_findings = merge_and_dedup(&style_pair.merged_findings, &logic_pair.merged_findings);
 
     ConsensusResult {
         verdict,
