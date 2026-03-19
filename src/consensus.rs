@@ -59,10 +59,10 @@ pub fn evaluate(groups: Vec<PairResult>) -> ConsensusResult {
     let gate_passed = groups.iter().all(|g| g.pair_passed);
     let verdict = if gate_passed { Verdict::Pass } else { Verdict::Fail };
 
-    // Merge findings from all groups incrementally.
-    let all_findings = groups.iter()
-        .map(|g| g.merged_findings.as_slice())
-        .fold(Vec::<Finding>::new(), |acc, findings| merge_and_dedup(&acc, findings));
+    let flat: Vec<Finding> = groups.iter()
+        .flat_map(|g| g.merged_findings.iter().cloned())
+        .collect();
+    let all_findings = merge_and_dedup(&flat, &[]);
 
     ConsensusResult { verdict, groups, all_findings, gate_passed }
 }

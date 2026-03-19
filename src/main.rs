@@ -38,7 +38,7 @@ enum ProviderKind {
 #[command(
     name       = "ai-reviewer",
     version,
-    about      = "AI-to-AI code review engine: 8-model quad-group cross-validation (Security · Correctness · Performance · Maintainability)",
+    about      = "AI-to-AI code review engine: 2-model × 4-focus quad-group review (Security · Correctness · Performance · Maintainability)",
     long_about = None,
 )]
 struct Cli {
@@ -210,15 +210,14 @@ async fn run() -> Result<bool> {
     // ── Distribute files round-robin into up to 4 groups ──────────────────
     // Each group is reviewed by the same A+B pair but with a distinct focus:
     //   G1 = Security · G2 = Correctness · G3 = Performance · G4 = Maintainability
-    const NUM_GROUPS: usize = 4;
-    const FOCUSES: [ReviewFocus; NUM_GROUPS] = [
+    const FOCUSES: [ReviewFocus; 4] = [
         ReviewFocus::Security,
         ReviewFocus::Correctness,
         ReviewFocus::Performance,
         ReviewFocus::Maintainability,
     ];
 
-    let n_groups = NUM_GROUPS.min(ast_contexts.len()).max(1);
+    let n_groups = FOCUSES.len().min(ast_contexts.len()).max(1);
     let mut file_groups: Vec<Vec<crate::ast::FileAstContext>> = vec![vec![]; n_groups];
     for (i, ctx) in ast_contexts.into_iter().enumerate() {
         file_groups[i % n_groups].push(ctx);
