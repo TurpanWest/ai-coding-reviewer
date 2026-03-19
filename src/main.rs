@@ -387,7 +387,7 @@ fn build_reviewer(
             let mid = model_id.unwrap_or_else(|| "MiniMax-M2.7".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout)))
+            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout, None)))
         }
         ProviderKind::Deepseek => {
             let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
@@ -397,20 +397,23 @@ fn build_reviewer(
                 deepseek::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout)))
+            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout, None)))
         }
         ProviderKind::Anthropic => {
             let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
             let base = base_url.unwrap_or_else(|| "https://api.anthropic.com".into());
             let client = anthropic::Client::new(&api_key, &base, None, "2023-06-01");
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout)))
+            // Enable automatic prompt caching: the stable system prompt (policy + schema)
+            // is cached at the provider side, slashing cost and latency on repeated CI runs.
+            let cache = serde_json::json!({"cache_control": {"type": "ephemeral"}});
+            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout, Some(cache))))
         }
         ProviderKind::Gemini => {
             let mid = model_id.unwrap_or_else(|| "gemini-3.1-pro-preview".into());
             let client = gemini::Client::new(&api_key);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout)))
+            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout, None)))
         }
         ProviderKind::Openai => {
             let mid = model_id.unwrap_or_else(|| "gpt-5.4".into());
@@ -420,7 +423,7 @@ fn build_reviewer(
                 openai::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout)))
+            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout, None)))
         }
     }
 }

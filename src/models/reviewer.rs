@@ -23,6 +23,9 @@ pub struct LlmReviewer<M: CompletionModel> {
     focus: ReviewFocus,
     /// Hard wall-clock timeout per individual LLM call (not per retry loop).
     timeout_secs: u64,
+    /// Provider-specific extra parameters merged into every completion request
+    /// (e.g. `{"cache_control": {"type": "ephemeral"}}` for Anthropic prefix caching).
+    extra_params: Option<serde_json::Value>,
 }
 
 impl<M: CompletionModel + Clone> LlmReviewer<M> {
@@ -32,8 +35,9 @@ impl<M: CompletionModel + Clone> LlmReviewer<M> {
         max_retries: u32,
         focus: ReviewFocus,
         timeout_secs: u64,
+        extra_params: Option<serde_json::Value>,
     ) -> Self {
-        Self { model, label: label.into(), max_retries, focus, timeout_secs }
+        Self { model, label: label.into(), max_retries, focus, timeout_secs, extra_params }
     }
 }
 
@@ -57,9 +61,12 @@ where
         let user_prompt = build_user_prompt(contexts);
 
         // Build a lightweight agent with the system prompt as its preamble.
-        let agent = rig::agent::AgentBuilder::new(self.model.clone())
-            .preamble(&system_prompt)
-            .build();
+        let mut builder = rig::agent::AgentBuilder::new(self.model.clone())
+            .preamble(&system_prompt);
+        if let Some(ref params) = self.extra_params {
+            builder = builder.additional_params(params.clone());
+        }
+        let agent = builder.build();
 
         // history is kept empty for every call. build_correction_prompt embeds
         // the original user prompt, the bad response, the parse error, and the
