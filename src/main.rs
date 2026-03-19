@@ -4,19 +4,22 @@ mod diff;
 mod models;
 mod prompt;
 mod report;
+mod telemetry;
 
 use std::io::Read;
 use std::path::PathBuf;
 use std::process;
 
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, ValueEnum};
 use rig::providers::{anthropic, deepseek, gemini, openai};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 use crate::models::reviewer::LlmReviewer;
 use crate::models::{ReviewFocus, Reviewer};
+use crate::telemetry::{record_review, Metrics};
 
 // ── Provider selection ─────────────────────────────────────────────────────────
 
@@ -169,16 +172,10 @@ async fn main() {
 async fn run() -> Result<bool> {
     let cli = Cli::parse();
 
-    // ── Logging ────────────────────────────────────────────────────────────
-    let filter = if cli.verbose {
-        EnvFilter::new("ai_reviewer=debug,info")
-    } else {
-        EnvFilter::from_default_env()
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    // ── Observability ──────────────────────────────────────────────────────
+    // _guard flushes OTel spans on drop (end of this function).
+    let _guard = telemetry::init_subscriber(cli.verbose);
+    let metrics = Metrics::new().context("Failed to initialise Prometheus metrics")?;
 
     // ── Read inputs ────────────────────────────────────────────────────────
     let diff_text = read_diff(&cli.diff)?;
@@ -193,6 +190,7 @@ async fn run() -> Result<bool> {
 
     // ── Guard: diff size limit ──────────────────────────────────────────────
     let diff_lines = diff_text.lines().count();
+    metrics.diff_lines.set(diff_lines as i64);
     if diff_lines > cli.max_diff_lines {
         anyhow::bail!(
             "Diff has {diff_lines} lines which exceeds --max-diff-lines limit of {}.\n\
@@ -327,12 +325,31 @@ async fn run() -> Result<bool> {
     let policy_la = policy_text.clone();
     let policy_lb = policy_text.clone();
 
-    let (r_sa, r_sb, r_la, r_lb) = tokio::join!(
-        async move { reviewer_style_a.review(&ctx_sa, &policy_sa).await },
-        async move { reviewer_style_b.review(&ctx_sb, &policy_sb).await },
-        async move { reviewer_logic_a.review(&ctx_la, &policy_la).await },
-        async move { reviewer_logic_b.review(&ctx_lb, &policy_lb).await },
+    // Each future captures its own Instant so wall-clock latency is measured
+    // per-reviewer (all 4 start concurrently, so start times are near-equal).
+    let (timed_sa, timed_sb, timed_la, timed_lb) = tokio::join!(
+        async move {
+            let t = Instant::now();
+            (t.elapsed(), reviewer_style_a.review(&ctx_sa, &policy_sa).await)
+        },
+        async move {
+            let t = Instant::now();
+            (t.elapsed(), reviewer_style_b.review(&ctx_sb, &policy_sb).await)
+        },
+        async move {
+            let t = Instant::now();
+            (t.elapsed(), reviewer_logic_a.review(&ctx_la, &policy_la).await)
+        },
+        async move {
+            let t = Instant::now();
+            (t.elapsed(), reviewer_logic_b.review(&ctx_lb, &policy_lb).await)
+        },
     );
+
+    let (dur_sa, r_sa) = timed_sa;
+    let (dur_sb, r_sb) = timed_sb;
+    let (dur_la, r_la) = timed_la;
+    let (dur_lb, r_lb) = timed_lb;
 
     info!(
         style_a_ok = r_sa.is_ok(),
@@ -341,6 +358,12 @@ async fn run() -> Result<bool> {
         logic_b_ok = r_lb.is_ok(),
         "All 4 reviewers completed"
     );
+
+    // ── Record per-reviewer metrics ────────────────────────────────────────
+    record_review(&metrics, &label_sa, "style", dur_sa, &r_sa);
+    record_review(&metrics, &label_sb, "style", dur_sb, &r_sb);
+    record_review(&metrics, &label_la, "logic", dur_la, &r_la);
+    record_review(&metrics, &label_lb, "logic", dur_lb, &r_lb);
 
     // ── Consensus evaluation ───────────────────────────────────────────────
     let style_pair = consensus::evaluate_pair(r_sa, r_sb, label_sa, label_sb, ReviewFocus::Style);
@@ -355,6 +378,8 @@ async fn run() -> Result<bool> {
     std::fs::write(&output_path, &report_md)
         .with_context(|| format!("Cannot write report to {}", output_path.display()))?;
 
+    metrics.gate_passed.set(if consensus.gate_passed { 1 } else { 0 });
+
     if consensus.gate_passed {
         println!(
             "[ai-reviewer] Gate PASSED — full report: {}",
@@ -366,6 +391,10 @@ async fn run() -> Result<bool> {
             output_path.display()
         );
     }
+
+    // ── Export Prometheus metrics ──────────────────────────────────────────
+    // Non-fatal: export errors are logged but do not affect the gate verdict.
+    metrics.export().await;
 
     Ok(consensus.gate_passed)
 }

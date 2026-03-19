@@ -105,6 +105,69 @@ DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
 
 ---
 
+## Observability
+
+### Prometheus Metrics
+
+Six metrics are recorded per run and exported to one or both sinks at the end. Both sinks are optional and independently configured.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `ai_reviewer_review_duration_seconds` | Histogram | `reviewer`, `focus` | End-to-end latency per reviewer slot, including retries and backoff |
+| `ai_reviewer_attempts_total` | Counter | `reviewer`, `focus`, `outcome` | LLM completion attempts. `outcome` is `success`, `timeout`, or `max_retries` |
+| `ai_reviewer_confidence` | Histogram | `reviewer`, `focus`, `verdict` | Model confidence score distribution on successful parses |
+| `ai_reviewer_findings_total` | Counter | `severity`, `reviewer`, `focus` | Total code findings raised |
+| `ai_reviewer_diff_lines` | Gauge | — | Lines in the reviewed diff |
+| `ai_reviewer_gate_passed` | Gauge | — | `1` if the consensus gate passed, `0` if it failed |
+
+**Sink A — textfile collector** (for Prometheus node_exporter):
+
+```bash
+export METRICS_FILE_PATH=/var/lib/node_exporter/textfile/ai_reviewer.prom
+```
+
+**Sink B — Pushgateway**:
+
+```bash
+export PROMETHEUS_PUSHGATEWAY_URL=http://pushgateway:9091
+# Metrics are pushed to: <URL>/metrics/job/ai-reviewer
+```
+
+---
+
+### Distributed Tracing (OpenTelemetry)
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, every run exports trace spans via OTLP/HTTP to your collector (Jaeger, Grafana Tempo, Datadog, etc.). Each reviewer call becomes a child span with structured attributes, making it possible to see exactly where time was spent and what each model returned.
+
+```
+run ──────────────────────────────────────────── 187s
+  ├─ reviewer.call  reviewer=MiniMax  focus=style ── 45s  verdict=pass  confidence=0.94  attempts=1
+  ├─ reviewer.call  reviewer=DeepSeek focus=style ── 52s  verdict=pass  confidence=0.91  attempts=1
+  ├─ reviewer.call  reviewer=MiniMax  focus=logic ── 38s  verdict=fail  confidence=0.87  attempts=2
+  └─ reviewer.call  reviewer=DeepSeek focus=logic ── 51s  verdict=pass  confidence=0.93  attempts=1
+```
+
+**Setup:**
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otel-collector:4318
+export OTEL_SERVICE_NAME=ai-reviewer   # optional, this is the default
+```
+
+If the endpoint is unreachable or the env var is not set, the tool falls back to normal log-only output — tracing is non-critical and never blocks a review run.
+
+**Span attributes recorded on each `reviewer.call` span:**
+
+| Attribute | Example value |
+|---|---|
+| `reviewer` | `MiniMax` |
+| `focus` | `Style` |
+| `verdict` | `pass` |
+| `confidence` | `0.94` |
+| `attempts` | `1` |
+
+---
+
 ## Example: Swap One Reviewer to Anthropic
 
 ```bash

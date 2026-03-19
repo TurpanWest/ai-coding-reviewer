@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rig::completion::{Chat, CompletionModel};
 use tokio::time::{sleep, timeout};
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 use crate::ast::FileAstContext;
 use crate::models::{ReviewError, ReviewFocus, ReviewResult};
@@ -41,18 +41,15 @@ impl<M: CompletionModel + Clone> LlmReviewer<M> {
     }
 }
 
-// ── Reviewer trait impl ───────────────────────────────────────────────────────
+// ── Private implementation ────────────────────────────────────────────────────
 
-#[async_trait]
-impl<M> super::Reviewer for LlmReviewer<M>
+impl<M> LlmReviewer<M>
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
 {
-    fn label(&self) -> &str {
-        &self.label
-    }
-
-    async fn review(
+    /// Inner review loop: retries, backoff, JSON correction.
+    /// Called from the `Reviewer` trait impl wrapped in a tracing span.
+    async fn do_review(
         &self,
         contexts: &[FileAstContext],
         policy_text: &str,
@@ -122,6 +119,11 @@ where
             match serde_json::from_str::<ReviewResult>(cleaned) {
                 Ok(mut result) => {
                     result.model_id = self.label.clone();
+                    // Record final verdict/confidence on the active OTel span.
+                    let span = tracing::Span::current();
+                    span.record("verdict", result.verdict.to_string());
+                    span.record("confidence", result.confidence);
+                    span.record("attempts", attempt + 1);
                     return Ok(result);
                 }
                 Err(e) => {
@@ -148,11 +150,48 @@ where
             }
         }
 
+        let total = self.max_retries + 1;
+        tracing::Span::current().record("attempts", total);
         Err(ReviewError::MaxRetriesExceeded {
-            attempts: self.max_retries + 1,
+            attempts: total,
             parse_error: last_error,
             raw: last_raw,
         })
+    }
+}
+
+// ── Reviewer trait impl ───────────────────────────────────────────────────────
+
+#[async_trait]
+impl<M> super::Reviewer for LlmReviewer<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    async fn review(
+        &self,
+        contexts: &[FileAstContext],
+        policy_text: &str,
+    ) -> Result<ReviewResult, ReviewError> {
+        // Wrap the entire review (including retries) in a tracing span.
+        // `tracing-opentelemetry` forwards this span to the OTLP collector when
+        // `OTEL_EXPORTER_OTLP_ENDPOINT` is set, enabling distributed tracing
+        // of individual reviewer calls within a CI pipeline.
+        let span = tracing::info_span!(
+            "reviewer.call",
+            reviewer   = %self.label,
+            focus      = ?self.focus,
+            verdict    = tracing::field::Empty,
+            confidence = tracing::field::Empty,
+            attempts   = tracing::field::Empty,
+        );
+
+        self.do_review(contexts, policy_text)
+            .instrument(span)
+            .await
     }
 }
 
