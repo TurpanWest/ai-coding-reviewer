@@ -11,7 +11,7 @@ pub const CONFIDENCE_THRESHOLD: f64 = 0.90;
 
 // ── Pair-level consensus ──────────────────────────────────────────────────────
 
-/// Evaluate a single reviewer pair (Style or Logic) and produce a `PairResult`.
+/// Evaluate a single reviewer pair and produce a `PairResult`.
 ///
 /// The pair passes only when:
 /// 1. Both models' confidence >= `CONFIDENCE_THRESHOLD`
@@ -22,6 +22,8 @@ pub fn evaluate_pair(
     label_a: String,
     label_b: String,
     focus: ReviewFocus,
+    group_index: usize,
+    files: Vec<String>,
 ) -> PairResult {
     let result_a = unwrap_or_fail(res_a, &label_a);
     let result_b = unwrap_or_fail(res_b, &label_b);
@@ -36,13 +38,10 @@ pub fn evaluate_pair(
 
     let merged_findings = merge_and_dedup(&result_a.findings, &result_b.findings);
 
-    let focus_label = match focus {
-        ReviewFocus::Style => "style".to_owned(),
-        ReviewFocus::Logic => "logic".to_owned(),
-    };
-
     PairResult {
-        focus: focus_label,
+        focus: focus.as_str().to_owned(),
+        group_index,
+        files,
         label_a,
         label_b,
         result_a,
@@ -54,21 +53,18 @@ pub fn evaluate_pair(
 
 // ── Final consensus ───────────────────────────────────────────────────────────
 
-/// Combine both pair results into the overall `ConsensusResult`.
-/// The gate passes only when **both pairs** pass.
-pub fn evaluate(style_pair: PairResult, logic_pair: PairResult) -> ConsensusResult {
-    let gate_passed = style_pair.pair_passed && logic_pair.pair_passed;
+/// Combine all group pair results into the overall `ConsensusResult`.
+/// The gate passes only when **every group** passes.
+pub fn evaluate(groups: Vec<PairResult>) -> ConsensusResult {
+    let gate_passed = groups.iter().all(|g| g.pair_passed);
     let verdict = if gate_passed { Verdict::Pass } else { Verdict::Fail };
 
-    let all_findings = merge_and_dedup(&style_pair.merged_findings, &logic_pair.merged_findings);
+    // Merge findings from all groups incrementally.
+    let all_findings = groups.iter()
+        .map(|g| g.merged_findings.as_slice())
+        .fold(Vec::<Finding>::new(), |acc, findings| merge_and_dedup(&acc, findings));
 
-    ConsensusResult {
-        verdict,
-        pair_style: style_pair,
-        pair_logic: logic_pair,
-        all_findings,
-        gate_passed,
-    }
+    ConsensusResult { verdict, groups, all_findings, gate_passed }
 }
 
 /// Returns a human-readable explanation of *why* the gate failed.
@@ -79,34 +75,35 @@ pub fn gate_failure_reason(result: &ConsensusResult) -> String {
 
     let mut reasons: Vec<String> = Vec::new();
 
-    for pair in [&result.pair_style, &result.pair_logic] {
-        if !pair.pair_passed {
-            let a = &pair.result_a;
-            let b = &pair.result_b;
-            let la = &pair.label_a;
-            let lb = &pair.label_b;
-            let focus = pair.focus.to_uppercase();
+    for group in &result.groups {
+        if !group.pair_passed {
+            let a = &group.result_a;
+            let b = &group.result_b;
+            let la = &group.label_a;
+            let lb = &group.label_b;
+            let focus = group.focus.to_uppercase();
+            let g = group.group_index + 1;
 
             if a.confidence < CONFIDENCE_THRESHOLD {
                 reasons.push(format!(
-                    "[{focus}] {la} confidence too low ({:.2} < {:.2})",
+                    "[G{g}/{focus}] {la} confidence too low ({:.2} < {:.2})",
                     a.confidence, CONFIDENCE_THRESHOLD
                 ));
             }
             if b.confidence < CONFIDENCE_THRESHOLD {
                 reasons.push(format!(
-                    "[{focus}] {lb} confidence too low ({:.2} < {:.2})",
+                    "[G{g}/{focus}] {lb} confidence too low ({:.2} < {:.2})",
                     b.confidence, CONFIDENCE_THRESHOLD
                 ));
             }
             if a.verdict != b.verdict {
                 reasons.push(format!(
-                    "[{focus}] Verdict conflict: {la}={} vs {lb}={}",
+                    "[G{g}/{focus}] Verdict conflict: {la}={} vs {lb}={}",
                     a.verdict, b.verdict
                 ));
             }
             if matches!(a.verdict, Verdict::Fail) && matches!(b.verdict, Verdict::Fail) {
-                reasons.push(format!("[{focus}] Both models confirmed defects"));
+                reasons.push(format!("[G{g}/{focus}] Both models confirmed defects"));
             }
         }
     }

@@ -38,7 +38,7 @@ enum ProviderKind {
 #[command(
     name       = "ai-reviewer",
     version,
-    about      = "AI-to-AI code review engine: 4-model dual-pair cross-validation with multi-provider support",
+    about      = "AI-to-AI code review engine: 8-model quad-group cross-validation (Security · Correctness · Performance · Maintainability)",
     long_about = None,
 )]
 struct Cli {
@@ -76,77 +76,41 @@ struct Cli {
     #[arg(long, default_value_t = 5000, env = "MAX_DIFF_LINES")]
     max_diff_lines: usize,
 
-    // ── Style pair: Reviewer 1 ─────────────────────────────────────────────────
+    // ── Reviewer A (one side of every group pair) ──────────────────────────────
 
-    /// Style reviewer A provider
+    /// Reviewer A provider — used as the first model in all four focus groups
     #[arg(long, default_value = "minimax", env = "REVIEWER_1")]
     reviewer_1: ProviderKind,
 
-    /// Style reviewer A model ID
+    /// Reviewer A model ID
     #[arg(long, env = "REVIEWER_1_MODEL")]
     reviewer_1_model: Option<String>,
 
-    /// Style reviewer A API key  [fallback: MINIMAX_API_KEY]
+    /// Reviewer A API key  [fallback: MINIMAX_API_KEY]
     #[arg(long, env = "REVIEWER_1_API_KEY")]
     reviewer_1_api_key: Option<String>,
 
-    /// Style reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
+    /// Reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
     #[arg(long, env = "REVIEWER_1_BASE_URL")]
     reviewer_1_base_url: Option<String>,
 
-    // ── Style pair: Reviewer 2 ─────────────────────────────────────────────────
+    // ── Reviewer B (other side of every group pair) ────────────────────────────
 
-    /// Style reviewer B provider
+    /// Reviewer B provider — used as the second model in all four focus groups
     #[arg(long, default_value = "deepseek", env = "REVIEWER_2")]
     reviewer_2: ProviderKind,
 
-    /// Style reviewer B model ID
+    /// Reviewer B model ID
     #[arg(long, env = "REVIEWER_2_MODEL")]
     reviewer_2_model: Option<String>,
 
-    /// Style reviewer B API key  [fallback: DEEPSEEK_API_KEY]
+    /// Reviewer B API key  [fallback: DEEPSEEK_API_KEY]
     #[arg(long, env = "REVIEWER_2_API_KEY")]
     reviewer_2_api_key: Option<String>,
 
-    /// Style reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
+    /// Reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
     #[arg(long, env = "REVIEWER_2_BASE_URL")]
     reviewer_2_base_url: Option<String>,
-
-    // ── Logic pair: Reviewer 3 ─────────────────────────────────────────────────
-
-    /// Logic reviewer A provider
-    #[arg(long, default_value = "minimax", env = "REVIEWER_3")]
-    reviewer_3: ProviderKind,
-
-    /// Logic reviewer A model ID
-    #[arg(long, env = "REVIEWER_3_MODEL")]
-    reviewer_3_model: Option<String>,
-
-    /// Logic reviewer A API key  [fallback: MINIMAX_API_KEY]
-    #[arg(long, env = "REVIEWER_3_API_KEY")]
-    reviewer_3_api_key: Option<String>,
-
-    /// Logic reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
-    #[arg(long, env = "REVIEWER_3_BASE_URL")]
-    reviewer_3_base_url: Option<String>,
-
-    // ── Logic pair: Reviewer 4 ─────────────────────────────────────────────────
-
-    /// Logic reviewer B provider
-    #[arg(long, default_value = "deepseek", env = "REVIEWER_4")]
-    reviewer_4: ProviderKind,
-
-    /// Logic reviewer B model ID
-    #[arg(long, env = "REVIEWER_4_MODEL")]
-    reviewer_4_model: Option<String>,
-
-    /// Logic reviewer B API key  [fallback: DEEPSEEK_API_KEY]
-    #[arg(long, env = "REVIEWER_4_API_KEY")]
-    reviewer_4_api_key: Option<String>,
-
-    /// Logic reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
-    #[arg(long, env = "REVIEWER_4_BASE_URL")]
-    reviewer_4_base_url: Option<String>,
 
     /// Enable verbose tracing output (or set RUST_LOG=info/debug)
     #[arg(short = 'v', long)]
@@ -227,148 +191,97 @@ async fn run() -> Result<bool> {
     }
 
     // ── Resolve API keys ───────────────────────────────────────────────────
-    let key_1 = resolve_api_key(
+    let key_a = resolve_api_key(
         cli.reviewer_1_api_key.as_deref(),
         "REVIEWER_1_API_KEY",
         "MINIMAX_API_KEY",
     )?;
-    let key_2 = resolve_api_key(
+    let key_b = resolve_api_key(
         cli.reviewer_2_api_key.as_deref(),
         "REVIEWER_2_API_KEY",
         "DEEPSEEK_API_KEY",
     )?;
-    let key_3 = resolve_api_key(
-        cli.reviewer_3_api_key.as_deref(),
-        "REVIEWER_3_API_KEY",
-        "MINIMAX_API_KEY",
-    )?;
-    let key_4 = resolve_api_key(
-        cli.reviewer_4_api_key.as_deref(),
-        "REVIEWER_4_API_KEY",
-        "DEEPSEEK_API_KEY",
-    )?;
 
-    let base_url_1 = cli.reviewer_1_base_url.clone()
+    let base_url_a = cli.reviewer_1_base_url.clone()
         .or_else(|| std::env::var("MINIMAX_BASE_URL").ok());
-    let base_url_2 = cli.reviewer_2_base_url.clone()
-        .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
-    let base_url_3 = cli.reviewer_3_base_url.clone()
-        .or_else(|| std::env::var("MINIMAX_BASE_URL").ok());
-    let base_url_4 = cli.reviewer_4_base_url.clone()
+    let base_url_b = cli.reviewer_2_base_url.clone()
         .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
 
-    // ── Build reviewers ────────────────────────────────────────────────────
-    let reviewer_style_a = build_reviewer(
-        cli.reviewer_1.clone(),
-        key_1,
-        base_url_1,
-        cli.reviewer_1_model.clone(),
-        cli.max_retries,
-        ReviewFocus::Style,
-        cli.reviewer_timeout,
-    )
-    .context("Failed to build style reviewer A")?;
+    // ── Distribute files round-robin into up to 4 groups ──────────────────
+    // Each group is reviewed by the same A+B pair but with a distinct focus:
+    //   G1 = Security · G2 = Correctness · G3 = Performance · G4 = Maintainability
+    const NUM_GROUPS: usize = 4;
+    const FOCUSES: [ReviewFocus; NUM_GROUPS] = [
+        ReviewFocus::Security,
+        ReviewFocus::Correctness,
+        ReviewFocus::Performance,
+        ReviewFocus::Maintainability,
+    ];
 
-    let reviewer_style_b = build_reviewer(
-        cli.reviewer_2.clone(),
-        key_2,
-        base_url_2,
-        cli.reviewer_2_model.clone(),
-        cli.max_retries,
-        ReviewFocus::Style,
-        cli.reviewer_timeout,
-    )
-    .context("Failed to build style reviewer B")?;
+    let n_groups = NUM_GROUPS.min(ast_contexts.len()).max(1);
+    let mut file_groups: Vec<Vec<crate::ast::FileAstContext>> = vec![vec![]; n_groups];
+    for (i, ctx) in ast_contexts.into_iter().enumerate() {
+        file_groups[i % n_groups].push(ctx);
+    }
 
-    let reviewer_logic_a = build_reviewer(
-        cli.reviewer_3.clone(),
-        key_3,
-        base_url_3,
-        cli.reviewer_3_model.clone(),
-        cli.max_retries,
-        ReviewFocus::Logic,
-        cli.reviewer_timeout,
-    )
-    .context("Failed to build logic reviewer A")?;
+    info!(n_groups, "Dispatching {n_groups}-group 8-LLM concurrent review");
 
-    let reviewer_logic_b = build_reviewer(
-        cli.reviewer_4.clone(),
-        key_4,
-        base_url_4,
-        cli.reviewer_4_model.clone(),
-        cli.max_retries,
-        ReviewFocus::Logic,
-        cli.reviewer_timeout,
-    )
-    .context("Failed to build logic reviewer B")?;
+    // ── Build reviewer instances per group and prepare futures ─────────────
+    // build_reviewer is cheap (HTTP client + model handle, no network call).
+    // Each group gets fresh instances so there is no shared mutable state.
+    let group_data: Vec<_> = file_groups
+        .into_iter()
+        .enumerate()
+        .map(|(i, group_ctx)| -> Result<_> {
+            let focus = FOCUSES[i];
+            let ra = build_reviewer(
+                cli.reviewer_1.clone(), key_a.clone(), base_url_a.clone(),
+                cli.reviewer_1_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
+            )
+            .with_context(|| format!("Failed to build reviewer A for group {i}"))?;
+            let rb = build_reviewer(
+                cli.reviewer_2.clone(), key_b.clone(), base_url_b.clone(),
+                cli.reviewer_2_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
+            )
+            .with_context(|| format!("Failed to build reviewer B for group {i}"))?;
+            let label_a = ra.label().to_owned();
+            let label_b = rb.label().to_owned();
+            let file_names: Vec<String> = group_ctx.iter().map(|c| c.file.clone()).collect();
+            Ok((i, group_ctx, ra, rb, label_a, label_b, focus, file_names))
+        })
+        .collect::<Result<_>>()?;
 
-    let label_sa = reviewer_style_a.label().to_owned();
-    let label_sb = reviewer_style_b.label().to_owned();
-    let label_la = reviewer_logic_a.label().to_owned();
-    let label_lb = reviewer_logic_b.label().to_owned();
+    // ── N-group concurrent review (2 LLMs per group = 8 total calls) ──────
+    let group_futures: Vec<_> = group_data
+        .into_iter()
+        .map(|(i, group_ctx, ra, rb, label_a, label_b, focus, file_names)| {
+            let policy = policy_text.clone();
+            async move {
+                let t = Instant::now();
+                let (r_a, r_b) = tokio::join!(
+                    ra.review(&group_ctx, &policy),
+                    rb.review(&group_ctx, &policy),
+                );
+                (i, t.elapsed(), r_a, r_b, label_a, label_b, focus, file_names)
+            }
+        })
+        .collect();
 
-    info!(
-        style_a = %label_sa,
-        style_b = %label_sb,
-        logic_a = %label_la,
-        logic_b = %label_lb,
-        "Dispatching 4-way concurrent review"
-    );
+    let raw_outputs = futures::future::join_all(group_futures).await;
 
-    // ── 4-way concurrent review ────────────────────────────────────────────
-    let ctx_sa = ast_contexts.clone();
-    let ctx_sb = ast_contexts.clone();
-    let ctx_la = ast_contexts.clone();
-    let ctx_lb = ast_contexts.clone();
-    let policy_sa = policy_text.clone();
-    let policy_sb = policy_text.clone();
-    let policy_la = policy_text.clone();
-    let policy_lb = policy_text.clone();
+    info!(groups = raw_outputs.len(), "All groups completed");
 
-    // Each future captures its own Instant so wall-clock latency is measured
-    // per-reviewer (all 4 start concurrently, so start times are near-equal).
-    let (timed_sa, timed_sb, timed_la, timed_lb) = tokio::join!(
-        async move {
-            let t = Instant::now();
-            (t.elapsed(), reviewer_style_a.review(&ctx_sa, &policy_sa).await)
-        },
-        async move {
-            let t = Instant::now();
-            (t.elapsed(), reviewer_style_b.review(&ctx_sb, &policy_sb).await)
-        },
-        async move {
-            let t = Instant::now();
-            (t.elapsed(), reviewer_logic_a.review(&ctx_la, &policy_la).await)
-        },
-        async move {
-            let t = Instant::now();
-            (t.elapsed(), reviewer_logic_b.review(&ctx_lb, &policy_lb).await)
-        },
-    );
-
-    let (dur_sa, r_sa) = timed_sa;
-    let (dur_sb, r_sb) = timed_sb;
-    let (dur_la, r_la) = timed_la;
-    let (dur_lb, r_lb) = timed_lb;
-
-    info!(
-        style_a_ok = r_sa.is_ok(),
-        style_b_ok = r_sb.is_ok(),
-        logic_a_ok = r_la.is_ok(),
-        logic_b_ok = r_lb.is_ok(),
-        "All 4 reviewers completed"
-    );
-
-    // ── Record per-reviewer metrics ────────────────────────────────────────
-    record_review(&metrics, &label_sa, "style", dur_sa, &r_sa);
-    record_review(&metrics, &label_sb, "style", dur_sb, &r_sb);
-    record_review(&metrics, &label_la, "logic", dur_la, &r_la);
-    record_review(&metrics, &label_lb, "logic", dur_lb, &r_lb);
+    // ── Record metrics and build pair results ──────────────────────────────
+    let mut pair_results = Vec::new();
+    for (i, dur, r_a, r_b, label_a, label_b, focus, file_names) in raw_outputs {
+        record_review(&metrics, &label_a, focus.as_str(), dur, &r_a);
+        record_review(&metrics, &label_b, focus.as_str(), dur, &r_b);
+        let pair = consensus::evaluate_pair(r_a, r_b, label_a, label_b, focus, i, file_names);
+        pair_results.push(pair);
+    }
 
     // ── Consensus evaluation ───────────────────────────────────────────────
-    let style_pair = consensus::evaluate_pair(r_sa, r_sb, label_sa, label_sb, ReviewFocus::Style);
-    let logic_pair = consensus::evaluate_pair(r_la, r_lb, label_la, label_lb, ReviewFocus::Logic);
-    let consensus = consensus::evaluate(style_pair, logic_pair);
+    let consensus = consensus::evaluate(pair_results);
 
     // ── Output ─────────────────────────────────────────────────────────────
     println!("{}", report::render_summary(&consensus));

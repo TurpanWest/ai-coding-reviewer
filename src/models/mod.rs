@@ -77,10 +77,15 @@ pub struct ReviewResult {
     pub reasoning: String,
 }
 
-/// Consensus result for a single reviewer pair (Style or Logic).
+/// Consensus result for one reviewer pair (one of the four focus groups).
 #[derive(Debug, Serialize)]
 pub struct PairResult {
+    /// Human-readable focus name, e.g. "security".
     pub focus: String,
+    /// 0-based index (0 = Security, 1 = Correctness, 2 = Performance, 3 = Maintainability).
+    pub group_index: usize,
+    /// Files assigned to this group.
+    pub files: Vec<String>,
     pub label_a: String,
     pub label_b: String,
     pub result_a: ReviewResult,
@@ -89,13 +94,13 @@ pub struct PairResult {
     pub pair_passed: bool,
 }
 
-/// Final output of the consensus engine combining both pairs.
+/// Final output of the consensus engine combining all four focus groups.
 #[derive(Debug, Serialize)]
 pub struct ConsensusResult {
     pub verdict: Verdict,
-    pub pair_style: PairResult,
-    pub pair_logic: PairResult,
-    /// All findings from both pairs, merged and deduplicated.
+    /// One entry per active review group (up to 4).
+    pub groups: Vec<PairResult>,
+    /// All findings from every group, merged and deduplicated.
     pub all_findings: Vec<Finding>,
     pub gate_passed: bool,
 }

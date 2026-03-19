@@ -28,6 +28,7 @@ tree-sitter-c-sharp  = "0.23"
 tree-sitter-bash     = "0.25"
 tree-sitter-scala    = "0.25"
 streaming-iterator   = "0.1"   # required by tree-sitter QueryMatches
+futures              = "0.3"   # join_all for dynamic N-group concurrency
 diffy                = "0.4"   # unified diff parser
 
 # ── Async runtime & AI providers ─────────────────────────────────────────────

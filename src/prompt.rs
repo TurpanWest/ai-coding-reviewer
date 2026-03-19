@@ -3,13 +3,29 @@ use crate::models::REVIEW_JSON_SCHEMA;
 
 // ── Review focus ──────────────────────────────────────────────────────────────
 
-/// Determines which category of issues a reviewer is assigned to analyse.
+/// Each of the four review groups is assigned one exclusive focus dimension.
+/// This keeps every LLM's attention narrow so it catches more within its lane.
 #[derive(Debug, Clone, Copy)]
 pub enum ReviewFocus {
-    /// Naming, readability, formatting, dead code, documentation.
-    Style,
-    /// Type errors, logic defects, security, data races, regressions.
-    Logic,
+    /// Injection, auth bypass, crypto misuse, secrets, input validation, SSRF.
+    Security,
+    /// Logic defects, type errors, null dereferences, races, error handling.
+    Correctness,
+    /// Algorithmic complexity, allocations, blocking calls, N+1, memory leaks.
+    Performance,
+    /// Naming, dead code, duplication, SRP violations, magic values, docs.
+    Maintainability,
+}
+
+impl ReviewFocus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewFocus::Security       => "security",
+            ReviewFocus::Correctness    => "correctness",
+            ReviewFocus::Performance    => "performance",
+            ReviewFocus::Maintainability => "maintainability",
+        }
+    }
 }
 
 // ── System prompt (cached portion) ───────────────────────────────────────────
@@ -21,17 +37,38 @@ pub enum ReviewFocus {
 /// `policy_text` is the raw Markdown content of the security/coding policy file.
 pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
     let focus_section = match focus {
-        ReviewFocus::Style => {
-            "## Your Assigned Focus: CODE STYLE\n\
-             Review ONLY for: naming conventions, code clarity, readability, formatting,\n\
-             dead code, unnecessary complexity, documentation gaps.\n\
-             Do NOT report logic bugs, type errors, or security issues — those are handled by another reviewer.\n\n"
+        ReviewFocus::Security => {
+            "## Your Assigned Focus: SECURITY\n\
+             Review ONLY for: SQL/command/LDAP injection, XSS, authentication & authorisation bypass,\n\
+             broken access control, sensitive data exposure, insecure or deprecated cryptography,\n\
+             SSRF, path traversal, deserialization flaws, hardcoded secrets/API keys,\n\
+             missing or bypassable input validation, unsafe use of eval/exec/shell.\n\
+             Do NOT report correctness, performance, or maintainability issues — those are handled by dedicated reviewers.\n\n"
         }
-        ReviewFocus::Logic => {
-            "## Your Assigned Focus: LOGIC & CORRECTNESS\n\
-             Review ONLY for: type errors, logic defects, null dereferences, API misuse,\n\
-             security vulnerabilities, data races, silent failures, regressions.\n\
-             Do NOT report style/naming issues — those are handled by another reviewer.\n\n"
+        ReviewFocus::Correctness => {
+            "## Your Assigned Focus: CORRECTNESS\n\
+             Review ONLY for: logic defects, type errors, integer overflow/underflow,\n\
+             null/nil dereferences, use-after-free, off-by-one errors, incorrect error handling,\n\
+             unchecked return values, data races & concurrency bugs, broken invariants,\n\
+             silent failure paths, API misuse that causes wrong behaviour, regressions.\n\
+             Do NOT report security, performance, or maintainability issues — those are handled by dedicated reviewers.\n\n"
+        }
+        ReviewFocus::Performance => {
+            "## Your Assigned Focus: PERFORMANCE\n\
+             Review ONLY for: algorithmic complexity (e.g. O(n²) where O(n) is achievable),\n\
+             unnecessary heap allocations or redundant clones in hot paths,\n\
+             blocking / synchronous calls inside async executors,\n\
+             N+1 query patterns, unbounded memory growth, cache-unfriendly data access,\n\
+             holding locks or large allocations across await points.\n\
+             Do NOT report security, correctness, or maintainability issues — those are handled by dedicated reviewers.\n\n"
+        }
+        ReviewFocus::Maintainability => {
+            "## Your Assigned Focus: MAINTAINABILITY\n\
+             Review ONLY for: unclear naming, dead or unreachable code, duplicated logic,\n\
+             overly complex control flow, missing or misleading comments/documentation,\n\
+             single-responsibility violations, hardcoded magic values, test coverage gaps\n\
+             for new branches, use of deprecated APIs, tight coupling & missing abstractions.\n\
+             Do NOT report security, correctness, or performance issues — those are handled by dedicated reviewers.\n\n"
         }
     };
 

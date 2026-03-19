@@ -20,6 +20,7 @@ dependencies = [
  "chrono",
  "clap",
  "diffy",
+ "futures",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

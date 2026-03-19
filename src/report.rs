@@ -27,17 +27,14 @@ pub fn render_report(result: &ConsensusResult) -> String {
         md.push_str(&format!("**Reason**: {}\n\n", gate_failure_reason(result)));
     }
 
-    // ── Confidence Summary (4 rows) ───────────────────────────────────────
+    // ── Confidence Summary ────────────────────────────────────────────────
     md.push_str("## Confidence Summary\n\n");
-    md.push_str("| Model | Focus | Verdict | Confidence | Gate |\n");
-    md.push_str("|---|---|---|---|---|\n");
-    for (label, r, focus) in [
-        (&result.pair_style.label_a, &result.pair_style.result_a, "Style"),
-        (&result.pair_style.label_b, &result.pair_style.result_b, "Style"),
-        (&result.pair_logic.label_a, &result.pair_logic.result_a, "Logic"),
-        (&result.pair_logic.label_b, &result.pair_logic.result_b, "Logic"),
-    ] {
-        md.push_str(&confidence_row(label, r, focus));
+    md.push_str("| Group | Model | Focus | Verdict | Confidence | Gate |\n");
+    md.push_str("|---|---|---|---|---|---|\n");
+    for group in &result.groups {
+        let g_label = format!("G{}", group.group_index + 1);
+        md.push_str(&confidence_row(&g_label, &group.label_a, &group.result_a, &group.focus));
+        md.push_str(&confidence_row(&g_label, &group.label_b, &group.result_b, &group.focus));
     }
     md.push_str(&format!("\n_Threshold: {:.0}%_\n\n", CONFIDENCE_THRESHOLD * 100.0));
 
@@ -59,54 +56,57 @@ pub fn render_report(result: &ConsensusResult) -> String {
         }
     }
 
-    // ── Model Reports (grouped by pair) ───────────────────────────────────
+    // ── Model Reports (one section per group) ────────────────────────────
     md.push_str("## Model Reports\n\n");
-    md.push_str(&pair_section("Style Review", &result.pair_style));
-    md.push_str(&pair_section("Logic Review", &result.pair_logic));
+    for group in &result.groups {
+        let files_str = if group.files.is_empty() {
+            "(none)".to_owned()
+        } else {
+            group.files.join(", ")
+        };
+        let title = format!(
+            "Group {} — {} — Files: {}",
+            group.group_index + 1,
+            group.focus.to_uppercase(),
+            files_str,
+        );
+        md.push_str(&pair_section(&title, group));
+    }
 
     md
 }
 
 /// Compact one-line summary printed to stdout on any run.
 pub fn render_summary(result: &ConsensusResult) -> String {
-    let sa = &result.pair_style.result_a;
-    let sb = &result.pair_style.result_b;
-    let la = &result.pair_logic.result_a;
-    let lb = &result.pair_logic.result_b;
-    let n = result.all_findings.len();
+    let group_tokens: Vec<String> = result.groups.iter().map(|g| {
+        let a = &g.result_a;
+        let b = &g.result_b;
+        format!(
+            "G{}[{}] {}:{} ({:.0}%) {}:{} ({:.0}%)",
+            g.group_index + 1,
+            g.focus.to_uppercase(),
+            g.label_a, a.verdict, a.confidence * 100.0,
+            g.label_b, b.verdict, b.confidence * 100.0,
+        )
+    }).collect();
 
     format!(
-        "[ai-reviewer] Verdict: {verdict}  |  \
-         {sla}[S]: {sav} ({sac:.0}%)  |  \
-         {slb}[S]: {sbv} ({sbc:.0}%)  |  \
-         {lla}[L]: {lav} ({lac:.0}%)  |  \
-         {llb}[L]: {lbv} ({lbc:.0}%)  |  \
-         Findings: {n}",
-        verdict = result.verdict,
-        sla = result.pair_style.label_a,
-        sav = sa.verdict,
-        sac = sa.confidence * 100.0,
-        slb = result.pair_style.label_b,
-        sbv = sb.verdict,
-        sbc = sb.confidence * 100.0,
-        lla = result.pair_logic.label_a,
-        lav = la.verdict,
-        lac = la.confidence * 100.0,
-        llb = result.pair_logic.label_b,
-        lbv = lb.verdict,
-        lbc = lb.confidence * 100.0,
-        n = n,
+        "[ai-reviewer] Verdict: {}  |  {}  |  Findings: {}",
+        result.verdict,
+        group_tokens.join("  |  "),
+        result.all_findings.len(),
     )
 }
 
 // ── Rendering helpers ─────────────────────────────────────────────────────────
 
-fn confidence_row(label: &str, r: &ReviewResult, focus: &str) -> String {
+fn confidence_row(group_label: &str, model_label: &str, r: &ReviewResult, focus: &str) -> String {
     let gate_ok = r.confidence >= CONFIDENCE_THRESHOLD && matches!(r.verdict, Verdict::Pass);
     let gate_sym = if gate_ok { "✅" } else { "❌" };
     format!(
-        "| `{}` | {} | {} | {:.1}% | {} |\n",
-        label,
+        "| {} | `{}` | {} | {} | {:.1}% | {} |\n",
+        group_label,
+        model_label,
         focus,
         r.verdict,
         r.confidence * 100.0,
