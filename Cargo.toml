@@ -15,8 +15,18 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # ── AST / diff parsing ───────────────────────────────────────────────────────
 tree-sitter          = "0.24"
-tree-sitter-rust     = "0.23"  # Rust grammar
-tree-sitter-python   = "0.23"  # Python grammar (extensible)
+tree-sitter-rust     = "0.23"
+tree-sitter-python   = "0.23"
+tree-sitter-go       = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-java     = "0.23"
+tree-sitter-c        = "0.24"
+tree-sitter-cpp      = "0.23"
+tree-sitter-ruby     = "0.23"
+tree-sitter-c-sharp  = "0.23"
+tree-sitter-bash     = "0.25"
+tree-sitter-scala    = "0.25"
 streaming-iterator   = "0.1"   # required by tree-sitter QueryMatches
 diffy                = "0.4"   # unified diff parser
 

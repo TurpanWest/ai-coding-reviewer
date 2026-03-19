@@ -61,8 +61,19 @@ pub struct FileAstContext {
 /// Returns (Language, lang_name_str) for supported extensions.
 fn detect_language(path: &Path) -> Option<(Language, &'static str)> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("rs") => Some((tree_sitter_rust::LANGUAGE.into(), "rust")),
-        Some("py") => Some((tree_sitter_python::LANGUAGE.into(), "python")),
+        Some("rs")                                              => Some((tree_sitter_rust::LANGUAGE.into(), "rust")),
+        Some("py")                                              => Some((tree_sitter_python::LANGUAGE.into(), "python")),
+        Some("go")                                              => Some((tree_sitter_go::LANGUAGE.into(), "go")),
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs")   => Some((tree_sitter_javascript::LANGUAGE.into(), "javascript")),
+        Some("ts")                                              => Some((tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), "typescript")),
+        Some("tsx")                                             => Some((tree_sitter_typescript::LANGUAGE_TSX.into(), "typescript")),
+        Some("java")                                            => Some((tree_sitter_java::LANGUAGE.into(), "java")),
+        Some("c") | Some("h")                                   => Some((tree_sitter_c::LANGUAGE.into(), "c")),
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("hxx") => Some((tree_sitter_cpp::LANGUAGE.into(), "cpp")),
+        Some("rb")                                              => Some((tree_sitter_ruby::LANGUAGE.into(), "ruby")),
+        Some("cs")                                              => Some((tree_sitter_c_sharp::LANGUAGE.into(), "csharp")),
+        Some("sh") | Some("bash")                               => Some((tree_sitter_bash::LANGUAGE.into(), "bash")),
+        Some("scala") | Some("sc")                              => Some((tree_sitter_scala::LANGUAGE.into(), "scala")),
         _ => None,
     }
 }
@@ -82,6 +93,63 @@ fn symbol_query_source(lang_name: &str) -> &'static str {
             "(function_definition name: (identifier) @name) @item
              (class_definition    name: (identifier) @name) @item"
         }
+        "go" => {
+            "(function_declaration name: (identifier) @name) @item
+             (method_declaration name: (field_identifier) @name) @item
+             (type_declaration (type_spec name: (type_identifier) @name)) @item"
+        }
+        "javascript" => {
+            "(function_declaration name: (identifier) @name) @item
+             (class_declaration name: (identifier) @name) @item
+             (method_definition name: (property_identifier) @name) @item"
+        }
+        "typescript" => {
+            "(function_declaration name: (identifier) @name) @item
+             (class_declaration name: (type_identifier) @name) @item
+             (method_definition name: (property_identifier) @name) @item
+             (interface_declaration name: (type_identifier) @name) @item
+             (type_alias_declaration name: (type_identifier) @name) @item"
+        }
+        "java" => {
+            "(method_declaration name: (identifier) @name) @item
+             (class_declaration name: (identifier) @name) @item
+             (interface_declaration name: (identifier) @name) @item
+             (enum_declaration name: (identifier) @name) @item"
+        }
+        "c" => {
+            "(function_definition declarator: (function_declarator declarator: (identifier) @name)) @item
+             (struct_specifier name: (type_identifier) @name) @item
+             (enum_specifier name: (type_identifier) @name) @item"
+        }
+        "cpp" => {
+            "(function_definition declarator: (function_declarator declarator: (identifier) @name)) @item
+             (function_definition declarator: (function_declarator declarator: (qualified_identifier name: (identifier) @name))) @item
+             (class_specifier name: (type_identifier) @name) @item
+             (struct_specifier name: (type_identifier) @name) @item
+             (namespace_definition name: (namespace_identifier) @name) @item"
+        }
+        "ruby" => {
+            "(method name: (identifier) @name) @item
+             (singleton_method name: (identifier) @name) @item
+             (class name: (constant) @name) @item
+             (module name: (constant) @name) @item"
+        }
+        "csharp" => {
+            "(method_declaration name: (identifier) @name) @item
+             (class_declaration name: (identifier) @name) @item
+             (interface_declaration name: (identifier) @name) @item
+             (struct_declaration name: (identifier) @name) @item
+             (enum_declaration name: (identifier) @name) @item"
+        }
+        "bash" => {
+            "(function_definition name: (word) @name) @item"
+        }
+        "scala" => {
+            "(function_definition name: (identifier) @name) @item
+             (class_definition name: (identifier) @name) @item
+             (object_definition name: (identifier) @name) @item
+             (trait_definition name: (identifier) @name) @item"
+        }
         _ => "",
     }
 }
@@ -100,6 +168,36 @@ fn call_query_source(lang_name: &str) -> &'static str {
         "python" => {
             "(call function: (identifier) @callee)
              (call function: (attribute attribute: (identifier) @callee))"
+        }
+        "go" => {
+            "(call_expression function: (identifier) @callee)
+             (call_expression function: (selector_expression field: (field_identifier) @callee))"
+        }
+        "javascript" | "typescript" => {
+            "(call_expression function: (identifier) @callee)
+             (call_expression function: (member_expression property: (property_identifier) @callee))"
+        }
+        "java" => {
+            "(method_invocation name: (identifier) @callee)
+             (object_creation_expression type: (type_identifier) @callee)"
+        }
+        "c" | "cpp" => {
+            "(call_expression function: (identifier) @callee)
+             (call_expression function: (field_expression field: (field_identifier) @callee))"
+        }
+        "ruby" => {
+            "(call method: (identifier) @callee)"
+        }
+        "csharp" => {
+            "(invocation_expression function: (identifier_name) @callee)
+             (invocation_expression function: (member_access_expression name: (identifier_name) @callee))"
+        }
+        "bash" => {
+            "(command name: (command_name (word) @callee))"
+        }
+        "scala" => {
+            "(call_expression function: (identifier) @callee)
+             (call_expression function: (field_expression field: (identifier) @callee))"
         }
         _ => "",
     }
@@ -230,13 +328,36 @@ fn collect_symbols(
             .to_owned();
 
         let kind = match item_node.kind() {
-            "function_item" | "function_definition" => SymbolKind::Function,
-            "impl_item" => SymbolKind::ImplBlock,
-            "struct_item" => SymbolKind::Struct,
-            "enum_item" => SymbolKind::Enum,
-            "trait_item" => SymbolKind::Trait,
-            "class_definition" => SymbolKind::Other("class".into()),
-            other => SymbolKind::Other(other.into()),
+            // Rust
+            "function_item"                                     => SymbolKind::Function,
+            "impl_item"                                         => SymbolKind::ImplBlock,
+            "struct_item"                                       => SymbolKind::Struct,
+            "enum_item"                                         => SymbolKind::Enum,
+            "trait_item"                                        => SymbolKind::Trait,
+            // functions (multi-language)
+            "function_definition"
+            | "function_declaration"
+            | "method_declaration"
+            | "method_definition"
+            | "method"
+            | "singleton_method"                                => SymbolKind::Function,
+            // structs
+            "struct_specifier" | "struct_declaration"           => SymbolKind::Struct,
+            // enums
+            "enum_specifier" | "enum_declaration"               => SymbolKind::Enum,
+            // traits / interfaces
+            "trait_definition" | "interface_declaration"        => SymbolKind::Trait,
+            // classes
+            "class_definition"
+            | "class_declaration"
+            | "class_specifier"
+            | "class"                                           => SymbolKind::Other("class".into()),
+            // other named constructs
+            "module"                                            => SymbolKind::Other("module".into()),
+            "namespace_definition"                              => SymbolKind::Other("namespace".into()),
+            "type_declaration" | "type_alias_declaration"       => SymbolKind::Other("type".into()),
+            "object_definition"                                 => SymbolKind::Other("object".into()),
+            other                                               => SymbolKind::Other(other.into()),
         };
 
         let node_src: String = item_node
