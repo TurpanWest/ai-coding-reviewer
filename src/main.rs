@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, ValueEnum};
-use rig::providers::{anthropic, deepseek, gemini, openai};
+use rig::providers::{anthropic, gemini, openai};
 use tracing::info;
 
 use crate::models::reviewer::LlmReviewer;
@@ -419,12 +419,14 @@ fn build_reviewer(
             Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout, None)))
         }
         ProviderKind::Deepseek => {
+            // DeepSeek's API is fully OpenAI-compatible.  Using openai::Client
+            // instead of deepseek::Client routes through rig's OpenAI code path,
+            // which correctly extracts and logs token usage from the response.
+            // rig's own deepseek provider omits the `usage` field from its
+            // CompletionResponse struct, so token counts are silently discarded.
+            let url = base_url.unwrap_or_else(|| "https://api.deepseek.com/v1".into());
             let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
-            let client = if let Some(url) = base_url {
-                deepseek::Client::from_url(&api_key, &url)
-            } else {
-                deepseek::Client::new(&api_key)
-            };
+            let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
             Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout, None)))
         }
