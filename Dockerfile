@@ -8,15 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Cache dependencies separately from source
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main(){}' > src/main.rs \
-    && cargo build --release \
-    && rm -rf src
-
-# Build the real binary
-COPY src ./src
-RUN touch src/main.rs && cargo build --release
+COPY . .
+RUN cargo build --release
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
