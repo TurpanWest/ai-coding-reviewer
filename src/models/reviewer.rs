@@ -3,12 +3,12 @@
 /// A single `LlmReviewer<M>` replaces the old `MinimaxReviewer` and
 /// `DeepSeekReviewer` hand-rolled HTTP clients.  It works with any provider
 /// that Rig supports (OpenAI, DeepSeek, Anthropic, Gemini, …).
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rig::completion::{Chat, CompletionModel};
 use tokio::time::{sleep, timeout};
-use tracing::{debug, warn, Instrument};
+use tracing::{debug, info, warn, Instrument};
 
 use crate::ast::FileAstContext;
 use crate::models::{ReviewError, ReviewFocus, ReviewResult};
@@ -91,14 +91,28 @@ where
 
             debug!(attempt, label = %self.label, "Review attempt");
 
+            let prompt_chars = current_prompt.len();
+            // Rough token estimate: ~4 chars per token for English/code mixed content.
+            let prompt_tokens_est = prompt_chars / 4;
+            info!(
+                attempt,
+                label = %self.label,
+                focus = ?self.focus,
+                prompt_chars,
+                prompt_tokens_est,
+                "LLM call start"
+            );
+
             // Hard per-call timeout: if the LLM hangs, we don't block the CI
             // worker forever — we convert the timeout into a ReviewError so the
             // consensus engine can handle it as a synthetic FAIL.
+            let call_start = Instant::now();
             let chat_result = timeout(
                 Duration::from_secs(self.timeout_secs),
                 agent.chat(current_prompt.clone(), vec![]),
             )
             .await;
+            let elapsed_ms = call_start.elapsed().as_millis();
 
             let raw = match chat_result {
                 Err(_elapsed) => {
@@ -112,6 +126,18 @@ where
                 Ok(Err(e)) => return Err(ReviewError::Completion(e.to_string())),
                 Ok(Ok(raw)) => raw,
             };
+
+            let response_chars = raw.len();
+            let response_tokens_est = response_chars / 4;
+            info!(
+                attempt,
+                label = %self.label,
+                focus = ?self.focus,
+                elapsed_ms,
+                response_chars,
+                response_tokens_est,
+                "LLM call complete"
+            );
 
             last_raw = raw.clone();
             let cleaned = strip_json_fences(strip_think_block(&raw));
