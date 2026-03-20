@@ -1,0 +1,59 @@
+name: 'AI Code Reviewer'
+description: 'AI-to-AI code review gate. Two LLM models review every diff across Security, Correctness, Performance, and Maintainability.'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  policy:
+    description: 'Path to the policy Markdown file (relative to repo root)'
+    required: false
+    default: '.github/review-policy.md'
+  threshold:
+    description: 'Confidence gate threshold (0.0–1.0)'
+    required: false
+    default: '0.90'
+  reviewer-1:
+    description: 'Provider for reviewer slot 1: minimax, deepseek, anthropic, gemini, openai'
+    required: false
+    default: 'minimax'
+  reviewer-1-model:
+    description: 'Model ID override for reviewer 1'
+    required: false
+    default: ''
+  reviewer-2:
+    description: 'Provider for reviewer slot 2: minimax, deepseek, anthropic, gemini, openai'
+    required: false
+    default: 'deepseek'
+  reviewer-2-model:
+    description: 'Model ID override for reviewer 2'
+    required: false
+    default: ''
+  max-diff-lines:
+    description: 'Refuse diffs larger than this line count'
+    required: false
+    default: '5000'
+  output:
+    description: 'Report output path (relative to repo root)'
+    required: false
+    default: 'review-report.md'
+
+outputs:
+  verdict:
+    description: '"pass" or "fail"'
+  report-path:
+    description: 'Absolute path to the written Markdown report'
+
+runs:
+  using: 'docker'
+  image: 'docker://ghcr.io/turpanwest/ai-coding-reviewer:latest'
+  env:
+    INPUT_POLICY: ${{ inputs.policy }}
+    INPUT_THRESHOLD: ${{ inputs.threshold }}
+    INPUT_REVIEWER_1: ${{ inputs.reviewer-1 }}
+    INPUT_REVIEWER_1_MODEL: ${{ inputs.reviewer-1-model }}
+    INPUT_REVIEWER_2: ${{ inputs.reviewer-2 }}
+    INPUT_REVIEWER_2_MODEL: ${{ inputs.reviewer-2-model }}
+    INPUT_MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
+    INPUT_OUTPUT: ${{ inputs.output }}
