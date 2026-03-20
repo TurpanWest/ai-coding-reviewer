@@ -1,6 +1,7 @@
 mod ast;
 mod consensus;
 mod diff;
+mod github;
 mod models;
 mod prompt;
 mod report;
@@ -111,6 +112,14 @@ struct Cli {
     /// Reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
     #[arg(long, env = "REVIEWER_2_BASE_URL")]
     reviewer_2_base_url: Option<String>,
+
+    /// GitHub PR URL to post review to (e.g. https://github.com/owner/repo/pull/123)
+    #[arg(long, value_name = "URL")]
+    pr_url: Option<String>,
+
+    /// GitHub token for PR review submission (falls back to GITHUB_TOKEN env var)
+    #[arg(long, value_name = "TOKEN", env = "GITHUB_TOKEN")]
+    github_token: Option<String>,
 
     /// Enable verbose tracing output (or set RUST_LOG=info/debug)
     #[arg(short = 'v', long)]
@@ -283,7 +292,8 @@ async fn run() -> Result<bool> {
     let consensus = consensus::evaluate(pair_results);
 
     // ── Output ─────────────────────────────────────────────────────────────
-    println!("{}", report::render_summary(&consensus));
+    let summary = report::render_summary(&consensus);
+    println!("{}", summary);
 
     let output_path = cli.output.unwrap_or_else(|| cli.source_root.join("review-report.md"));
     let report_md = report::render_report(&consensus);
@@ -307,6 +317,22 @@ async fn run() -> Result<bool> {
     // ── Export Prometheus metrics ──────────────────────────────────────────
     // Non-fatal: export errors are logged but do not affect the gate verdict.
     metrics.export().await;
+
+    // ── GitHub PR Review (optional, non-fatal) ─────────────────────────────
+    if let Some(pr_url) = cli.pr_url {
+        match cli.github_token.filter(|t| !t.is_empty()) {
+            None => tracing::warn!(
+                "--pr-url provided but no GitHub token found; set GITHUB_TOKEN or --github-token"
+            ),
+            Some(token) => {
+                let cfg = github::GithubConfig { pr_url, token };
+                match github::submit_review(&cfg, &consensus, &summary).await {
+                    Ok(()) => tracing::info!("GitHub PR review submitted successfully"),
+                    Err(e) => tracing::warn!("GitHub PR review submission failed (non-fatal): {e:#}"),
+                }
+            }
+        }
+    }
 
     Ok(consensus.gate_passed)
 }
