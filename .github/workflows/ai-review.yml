@@ -1,0 +1,56 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  ai-review:
+    name: AI Review Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 需要完整历史才能 diff
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build ai-reviewer
+        run: cargo build --release
+
+      - name: Generate diff (PR head vs base branch)
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          echo "=== Diff stats ==="
+          wc -l /tmp/pr.diff
+
+      - name: Run AI review
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          ./target/release/ai-reviewer \
+            --diff /tmp/pr.diff \
+            --policy policy.md \
+            --output review-report.md
+
+      - name: Upload review report
+        if: always()                # 无论 pass/fail 都上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-report
+          path: review-report.md
