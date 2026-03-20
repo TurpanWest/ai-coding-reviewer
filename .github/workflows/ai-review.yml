@@ -8,6 +8,8 @@ jobs:
   ai-review:
     name: AI Review Gate
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # required to post PR reviews
 
     steps:
       - name: Checkout code
@@ -34,12 +36,14 @@ jobs:
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUST_LOG: ai_reviewer=info
         run: |
           ./target/release/ai-reviewer \
             --diff /tmp/pr.diff \
             --policy policy.md \
-            --output review-report.md
+            --output review-report.md \
+            --pr-url ${{ github.event.pull_request.html_url }}
 
       - name: Print review report
         if: always()
