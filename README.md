@@ -1,6 +1,6 @@
 # ai-reviewer
 
-> **⚠️ Work in Progress** — This project is under active development. It is not guaranteed to build or run successfully on your machine.
+> **⚠️ Work in Progress** — This project is under active development. It is not guaranteed to build or run successfully on your machine. CI gate via GitHub Actions is now active.
 
 AI-to-AI code review engine. Two models (A and B) independently review every diff across four focus dimensions — Security, Correctness, Performance, and Maintainability — in parallel via a quad-group consensus gate. All four groups must agree with high confidence, or the pipeline is blocked.
 
