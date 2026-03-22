@@ -207,9 +207,11 @@ async fn run() -> Result<bool> {
     let base_url_b = cli.reviewer_2_base_url.clone()
         .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
 
-    // ── Distribute files round-robin into up to 4 groups ──────────────────
-    // Each group is reviewed by the same A+B pair but with a distinct focus:
-    //   G1 = Security · G2 = Correctness · G3 = Performance · G4 = Maintainability
+    // ── All 4 focus groups always run, each reviewing every changed file ───
+    // Each group uses the same A+B reviewer pair but with a distinct focus:
+    //   G0 = Security · G1 = Correctness · G2 = Performance · G3 = Maintainability
+    // Files are NOT split across groups — every group sees all changed files.
+    // This ensures complete coverage even when only one file is modified.
     const FOCUSES: [ReviewFocus; 4] = [
         ReviewFocus::Security,
         ReviewFocus::Correctness,
@@ -217,11 +219,10 @@ async fn run() -> Result<bool> {
         ReviewFocus::Maintainability,
     ];
 
-    let n_groups = FOCUSES.len().min(ast_contexts.len()).max(1);
-    let mut file_groups: Vec<Vec<crate::ast::FileAstContext>> = vec![vec![]; n_groups];
-    for (i, ctx) in ast_contexts.into_iter().enumerate() {
-        file_groups[i % n_groups].push(ctx);
-    }
+    let n_groups = FOCUSES.len();
+    let file_groups: Vec<Vec<crate::ast::FileAstContext>> = (0..n_groups)
+        .map(|_| ast_contexts.clone())
+        .collect();
 
     info!(n_groups, "Dispatching {n_groups}-group 8-LLM concurrent review");
 
