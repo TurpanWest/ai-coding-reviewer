@@ -121,6 +121,28 @@ Field semantics:
     )
 }
 
+// ── Tool-aware system prompt ──────────────────────────────────────────────────
+
+/// Variant of [`build_system_prompt`] that appends tool-usage instructions.
+///
+/// Used when the reviewer has `read_file` / `find_symbol` tools available so
+/// the LLM knows it can request additional context before giving its verdict.
+pub fn build_system_prompt_with_tools(policy_text: &str, focus: ReviewFocus) -> String {
+    let base = build_system_prompt(policy_text, focus);
+    format!(
+        "{base}\n\n\
+## Tool Usage\n\
+You have access to tools to read additional source code from the repository.\n\
+Use `read_file` or `find_symbol` when:\n\
+- The diff calls a function whose full definition is NOT shown in the context above\n\
+- You need to verify a callee's implementation to judge correctness or security\n\
+- You need to see how a changed interface is used elsewhere in the codebase\n\n\
+Call tools as needed before producing your verdict. When you have sufficient context,\n\
+output the final JSON review result as your last message.\n\
+Do NOT call tools to re-read content already visible in the diff or symbol context above.\n"
+    )
+}
+
 // ── User prompt (dynamic portion) ────────────────────────────────────────────
 
 /// Build the **user prompt** for the first (non-retry) attempt.

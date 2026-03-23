@@ -5,6 +5,7 @@ mod models;
 mod prompt;
 mod report;
 mod telemetry;
+mod tools;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -237,11 +238,13 @@ async fn run() -> Result<bool> {
             let ra = build_reviewer(
                 cli.reviewer_1.clone(), key_a.clone(), base_url_a.clone(),
                 cli.reviewer_1_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
+                Some(cli.source_root.clone()),
             )
             .with_context(|| format!("Failed to build reviewer A for group {i}"))?;
             let rb = build_reviewer(
                 cli.reviewer_2.clone(), key_b.clone(), base_url_b.clone(),
                 cli.reviewer_2_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
+                Some(cli.source_root.clone()),
             )
             .with_context(|| format!("Failed to build reviewer B for group {i}"))?;
             let label_a = ra.label().to_owned();
@@ -314,6 +317,7 @@ async fn run() -> Result<bool> {
 
 // ── Provider builder ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn build_reviewer(
     kind: ProviderKind,
     api_key: String,
@@ -322,6 +326,7 @@ fn build_reviewer(
     max_retries: u32,
     focus: ReviewFocus,
     reviewer_timeout: u64,
+    source_root: Option<PathBuf>,
 ) -> Result<Box<dyn Reviewer>> {
     match kind {
         ProviderKind::Minimax => {
@@ -329,7 +334,7 @@ fn build_reviewer(
             let mid = model_id.unwrap_or_else(|| "MiniMax-M2.7".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout, None)))
+            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout, None, source_root)))
         }
         ProviderKind::Deepseek => {
             // DeepSeek's API is fully OpenAI-compatible.  Using openai::Client
@@ -341,7 +346,7 @@ fn build_reviewer(
             let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
             let client = openai::Client::from_url(&api_key, &url);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout, None)))
+            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout, None, source_root)))
         }
         ProviderKind::Anthropic => {
             let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
@@ -351,13 +356,13 @@ fn build_reviewer(
             // Enable automatic prompt caching: the stable system prompt (policy + schema)
             // is cached at the provider side, slashing cost and latency on repeated CI runs.
             let cache = serde_json::json!({"cache_control": {"type": "ephemeral"}});
-            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout, Some(cache))))
+            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout, Some(cache), source_root)))
         }
         ProviderKind::Gemini => {
             let mid = model_id.unwrap_or_else(|| "gemini-3.1-pro-preview".into());
             let client = gemini::Client::new(&api_key);
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout, None)))
+            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout, None, source_root)))
         }
         ProviderKind::Openai => {
             let mid = model_id.unwrap_or_else(|| "gpt-5.4".into());
@@ -367,7 +372,7 @@ fn build_reviewer(
                 openai::Client::new(&api_key)
             };
             let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout, None)))
+            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout, None, source_root)))
         }
     }
 }
