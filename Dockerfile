@@ -1,9 +1,8 @@
 # ─── Stage 1: dependency planner ─────────────────────────────────────────────
-# cargo-chef computes a "recipe" (the dependency fingerprint) that lets Docker
-# cache the compiled dependencies as a separate layer.  When only src/ changes
-# that layer is reused, so the full rebuild is avoided.
-FROM rust:1-alpine AS chef
-RUN apk add --no-cache musl-dev gcc g++ make openssl-dev pkgconf
+FROM rust:1-slim-bookworm AS chef
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev gcc g++ make \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
@@ -15,18 +14,19 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
-# Build *only* dependencies (this layer is cached as long as Cargo.lock doesn't change)
+# Build *only* dependencies (cached as long as Cargo.lock doesn't change)
 RUN cargo chef cook --release --recipe-path recipe.json
 
-# Now build the real binary (only src/** is not cached)
+# Build the real binary (only src/** is not cached)
 COPY . .
 RUN cargo build --release
 
 # ─── Stage 3: minimal runtime image ──────────────────────────────────────────
-FROM alpine:3
+FROM debian:bookworm-slim
 
-# ca-certificates is required for TLS (reqwest + rustls verify against system roots)
-RUN apk add --no-cache ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ai-reviewer /usr/local/bin/ai-reviewer
 
