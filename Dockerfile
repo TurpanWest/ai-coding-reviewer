@@ -3,7 +3,7 @@
 # cache the compiled dependencies as a separate layer.  When only src/ changes
 # that layer is reused, so the full rebuild is avoided.
 FROM rust:1-alpine AS chef
-RUN apk add --no-cache musl-dev gcc g++ make
+RUN apk add --no-cache musl-dev gcc g++ make openssl-dev pkgconf
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
