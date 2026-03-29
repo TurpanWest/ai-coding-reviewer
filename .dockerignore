@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+*.md
+!policy.md
+review-report.md
+GAP_ANALYSIS.md
