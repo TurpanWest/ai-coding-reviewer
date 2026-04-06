@@ -87,11 +87,11 @@ struct Cli {
     #[arg(long, env = "REVIEWER_1_MODEL")]
     reviewer_1_model: Option<String>,
 
-    /// Reviewer A API key  [fallback: MINIMAX_API_KEY]
+    /// Reviewer A API key
     #[arg(long, env = "REVIEWER_1_API_KEY")]
     reviewer_1_api_key: Option<String>,
 
-    /// Reviewer A base URL (OpenAI-compat providers only) [fallback: MINIMAX_BASE_URL]
+    /// Reviewer A base URL (OpenAI-compat providers only)
     #[arg(long, env = "REVIEWER_1_BASE_URL")]
     reviewer_1_base_url: Option<String>,
 
@@ -105,11 +105,11 @@ struct Cli {
     #[arg(long, env = "REVIEWER_2_MODEL")]
     reviewer_2_model: Option<String>,
 
-    /// Reviewer B API key  [fallback: DEEPSEEK_API_KEY]
+    /// Reviewer B API key
     #[arg(long, env = "REVIEWER_2_API_KEY")]
     reviewer_2_api_key: Option<String>,
 
-    /// Reviewer B base URL (OpenAI-compat providers only) [fallback: DEEPSEEK_BASE_URL]
+    /// Reviewer B base URL (OpenAI-compat providers only)
     #[arg(long, env = "REVIEWER_2_BASE_URL")]
     reviewer_2_base_url: Option<String>,
 
@@ -192,21 +192,11 @@ async fn run() -> Result<bool> {
     }
 
     // ── Resolve API keys ───────────────────────────────────────────────────
-    let key_a = resolve_api_key(
-        cli.reviewer_1_api_key.as_deref(),
-        "REVIEWER_1_API_KEY",
-        "MINIMAX_API_KEY",
-    )?;
-    let key_b = resolve_api_key(
-        cli.reviewer_2_api_key.as_deref(),
-        "REVIEWER_2_API_KEY",
-        "DEEPSEEK_API_KEY",
-    )?;
+    let key_a = resolve_api_key(cli.reviewer_1_api_key.as_deref(), "REVIEWER_1_API_KEY")?;
+    let key_b = resolve_api_key(cli.reviewer_2_api_key.as_deref(), "REVIEWER_2_API_KEY")?;
 
-    let base_url_a = cli.reviewer_1_base_url.clone()
-        .or_else(|| std::env::var("MINIMAX_BASE_URL").ok());
-    let base_url_b = cli.reviewer_2_base_url.clone()
-        .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok());
+    let base_url_a = cli.reviewer_1_base_url.clone();
+    let base_url_b = cli.reviewer_2_base_url.clone();
 
     // ── All 4 focus groups always run, each reviewing every changed file ───
     // Each group uses the same A+B reviewer pair but with a distinct focus:
@@ -391,21 +381,15 @@ fn parse_threshold(s: &str) -> Result<f64, String> {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Resolve an API key: prefer explicit arg/env, then fall back to legacy env var.
+/// Resolve an API key from the CLI arg or its corresponding env var.
 ///
-/// `primary_env` is read by clap via `#[arg(env = "...")]` and arrives through
-/// `explicit`; it is listed here solely for the error message so users see both
-/// valid env var names when neither is set.
-fn resolve_api_key(
-    explicit: Option<&str>,
-    primary_env: &str,
-    legacy_env: &str,
-) -> Result<String> {
+/// `env_var` is read by clap via `#[arg(env = "...")]` and arrives through
+/// `explicit`; it is listed here solely for the error message.
+fn resolve_api_key(explicit: Option<&str>, env_var: &str) -> Result<String> {
     if let Some(k) = explicit {
         return Ok(k.to_owned());
     }
-    std::env::var(legacy_env)
-        .with_context(|| format!("API key not set (set {primary_env} or {legacy_env})"))
+    Err(anyhow::anyhow!("API key not set (set {env_var} or pass --reviewer-N-api-key)"))
 }
 
 fn read_diff(path: &str) -> Result<String> {

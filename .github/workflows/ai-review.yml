@@ -41,14 +41,14 @@ jobs:
 
       - name: Run AI review
         env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
+          REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
           RUST_LOG: ai_reviewer=info
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
-            -e MINIMAX_API_KEY \
-            -e DEEPSEEK_API_KEY \
+            -e REVIEWER_1_API_KEY \
+            -e REVIEWER_2_API_KEY \
             -e RUST_LOG \
             ghcr.io/${{ github.repository }}:latest \
             --diff /repo/pr.diff \
