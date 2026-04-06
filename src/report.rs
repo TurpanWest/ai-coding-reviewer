@@ -188,3 +188,95 @@ fn severity_badge(s: &Severity) -> &'static str {
         Severity::Info => "⚪ INFO",
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{CodeLocation, Finding, Severity};
+
+    fn make_result(verdict: Verdict, confidence: f64) -> ReviewResult {
+        ReviewResult {
+            model_id: "M".into(),
+            verdict,
+            confidence,
+            findings: vec![],
+            reasoning: "ok".into(),
+        }
+    }
+
+    fn make_pair(passed: bool) -> PairResult {
+        let v = if passed { Verdict::Pass } else { Verdict::Fail };
+        let conf = if passed { 0.95 } else { 0.5 };
+        PairResult {
+            focus: "security".into(),
+            group_index: 0,
+            files: vec!["f.rs".into()],
+            label_a: "A".into(),
+            label_b: "B".into(),
+            result_a: make_result(v.clone(), conf),
+            result_b: make_result(v, conf),
+            merged_findings: vec![],
+            pair_passed: passed,
+        }
+    }
+
+    fn make_consensus(passed: bool) -> ConsensusResult {
+        let verdict = if passed { Verdict::Pass } else { Verdict::Fail };
+        ConsensusResult {
+            verdict,
+            groups: vec![make_pair(passed)],
+            all_findings: vec![],
+            gate_passed: passed,
+        }
+    }
+
+    #[test]
+    fn test_render_summary_pass_contains_pass() {
+        let s = render_summary(&make_consensus(true));
+        assert!(s.contains("PASS"));
+        assert!(s.contains("Findings: 0"));
+    }
+
+    #[test]
+    fn test_render_summary_fail_contains_fail() {
+        let s = render_summary(&make_consensus(false));
+        assert!(s.contains("FAIL"));
+    }
+
+    #[test]
+    fn test_render_report_pass_has_badge() {
+        let r = render_report(&make_consensus(true));
+        assert!(r.contains("✅ PASS"));
+        assert!(!r.contains("Failure Analysis"));
+    }
+
+    #[test]
+    fn test_render_report_fail_has_failure_analysis() {
+        let r = render_report(&make_consensus(false));
+        assert!(r.contains("❌ FAIL"));
+        assert!(r.contains("Failure Analysis"));
+    }
+
+    #[test]
+    fn test_render_report_no_findings_message() {
+        let r = render_report(&make_consensus(true));
+        assert!(r.contains("No findings reported"));
+    }
+
+    #[test]
+    fn test_render_report_finding_appears_in_table() {
+        let mut c = make_consensus(false);
+        c.all_findings = vec![Finding {
+            severity: Severity::High,
+            location: CodeLocation { file: "src/lib.rs".into(), line_start: 10, line_end: 12 },
+            rule_id: "SEC-001".into(),
+            description: "SQL injection".into(),
+            suggestion: "use parameterised queries".into(),
+        }];
+        let r = render_report(&c);
+        assert!(r.contains("SEC-001"));
+        assert!(r.contains("src/lib.rs"));
+    }
+}

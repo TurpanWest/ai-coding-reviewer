@@ -376,3 +376,126 @@ fn group_edges_by_caller(
     }
     map
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::FileAstContext;
+
+    fn ctx(file: &str, raw_diff: &str) -> FileAstContext {
+        FileAstContext {
+            file: file.into(),
+            changed_symbols: vec![],
+            all_symbols: vec![],
+            call_edges: vec![],
+            raw_diff: raw_diff.into(),
+        }
+    }
+
+    // ── parse_ignore_comment ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_ignore_double_slash() {
+        let ann = parse_ignore_comment("// ai-reviewer: ignore[SEC-001]", "f.rs").unwrap();
+        assert_eq!(ann.rule_id, "SEC-001");
+        assert!(ann.reason.is_empty());
+    }
+
+    #[test]
+    fn test_ignore_hash_style() {
+        let ann = parse_ignore_comment("# ai-reviewer: ignore[PERF-042]", "f.py").unwrap();
+        assert_eq!(ann.rule_id, "PERF-042");
+    }
+
+    #[test]
+    fn test_ignore_with_dash_reason() {
+        let ann = parse_ignore_comment(
+            "// ai-reviewer: ignore[SEC-001] - intentional fallthrough",
+            "f.rs",
+        ).unwrap();
+        assert_eq!(ann.rule_id, "SEC-001");
+        assert_eq!(ann.reason, "intentional fallthrough");
+    }
+
+    #[test]
+    fn test_ignore_with_emdash_reason() {
+        let ann = parse_ignore_comment(
+            "// ai-reviewer: ignore[SEC-001] — safe here",
+            "f.rs",
+        ).unwrap();
+        assert_eq!(ann.reason, "safe here");
+    }
+
+    #[test]
+    fn test_ignore_empty_rule_id_rejected() {
+        assert!(parse_ignore_comment("// ai-reviewer: ignore[]", "f.rs").is_none());
+    }
+
+    #[test]
+    fn test_ignore_no_marker_returns_none() {
+        assert!(parse_ignore_comment("// just a comment", "f.rs").is_none());
+    }
+
+    // ── extract_ignore_annotations ────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_from_added_line() {
+        let raw = "+// ai-reviewer: ignore[R1]\n";
+        let anns = extract_ignore_annotations(&[ctx("f.rs", raw)]);
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].rule_id, "R1");
+    }
+
+    #[test]
+    fn test_extract_from_context_line() {
+        let raw = " // ai-reviewer: ignore[R2]\n";
+        let anns = extract_ignore_annotations(&[ctx("f.rs", raw)]);
+        assert_eq!(anns.len(), 1);
+    }
+
+    #[test]
+    fn test_removed_lines_not_extracted() {
+        // Lines starting with `-` are deleted — ignore annotations on them
+        // should NOT suppress findings in the new file.
+        let raw = "-// ai-reviewer: ignore[R1]\n";
+        let anns = extract_ignore_annotations(&[ctx("f.rs", raw)]);
+        assert!(anns.is_empty());
+    }
+
+    // ── build_user_prompt ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_user_prompt_contains_filename() {
+        let prompt = build_user_prompt(&[ctx("src/auth.rs", "+fn login() {}")]);
+        assert!(prompt.contains("src/auth.rs"));
+    }
+
+    #[test]
+    fn test_build_user_prompt_annotations_section_present() {
+        let raw = "+// ai-reviewer: ignore[SEC-001] - test\n";
+        let prompt = build_user_prompt(&[ctx("f.rs", raw)]);
+        assert!(prompt.contains("SEC-001"));
+        assert!(prompt.contains("Acknowledged Exceptions"));
+    }
+
+    // ── build_correction_prompt ───────────────────────────────────────────────
+
+    #[test]
+    fn test_build_correction_prompt_contains_attempt_info() {
+        let p = build_correction_prompt("original", "{bad json}", "unexpected token", 2, 4);
+        assert!(p.contains("2/4"));
+        assert!(p.contains("unexpected token"));
+    }
+
+    // ── ReviewFocus::as_str ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_review_focus_as_str() {
+        assert_eq!(ReviewFocus::Security.as_str(), "security");
+        assert_eq!(ReviewFocus::Correctness.as_str(), "correctness");
+        assert_eq!(ReviewFocus::Performance.as_str(), "performance");
+        assert_eq!(ReviewFocus::Maintainability.as_str(), "maintainability");
+    }
+}

@@ -407,3 +407,52 @@ fn strip_json_fences(raw: &str) -> &str {
     }
     trimmed
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_think_block ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_think_well_formed() {
+        let raw = "<think>reasoning here</think>\n{\"verdict\":\"pass\"}";
+        assert_eq!(strip_think_block(raw), "{\"verdict\":\"pass\"}");
+    }
+
+    #[test]
+    fn test_strip_think_truncated_finds_json() {
+        // Model hit token limit inside think block; JSON object follows on new line.
+        let raw = "<think>analysis...\n{\"verdict\":\"pass\"}";
+        let result = strip_think_block(raw);
+        assert!(result.contains("\"verdict\""));
+    }
+
+    #[test]
+    fn test_strip_think_no_block_returns_input() {
+        let raw = "{\"verdict\":\"pass\"}";
+        assert_eq!(strip_think_block(raw), raw);
+    }
+
+    // ── strip_json_fences ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_fences_json_prefix() {
+        let raw = "```json\n{\"verdict\":\"pass\"}\n```";
+        assert_eq!(strip_json_fences(raw), "{\"verdict\":\"pass\"}");
+    }
+
+    #[test]
+    fn test_strip_fences_plain_prefix() {
+        let raw = "```\n{\"verdict\":\"pass\"}\n```";
+        assert_eq!(strip_json_fences(raw), "{\"verdict\":\"pass\"}");
+    }
+
+    #[test]
+    fn test_strip_fences_no_fence_returns_trimmed() {
+        let raw = "  {\"verdict\":\"pass\"}  ";
+        assert_eq!(strip_json_fences(raw), "{\"verdict\":\"pass\"}");
+    }
+}

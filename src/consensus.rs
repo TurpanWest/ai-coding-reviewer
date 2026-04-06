@@ -166,6 +166,140 @@ fn severity_rank(s: &Severity) -> u8 {
 
 // ── Error → synthetic ReviewResult ───────────────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ReviewError;
+    use crate::prompt::ReviewFocus;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn pass(confidence: f64) -> ReviewResult {
+        ReviewResult {
+            model_id: "test".into(),
+            verdict: Verdict::Pass,
+            confidence,
+            findings: vec![],
+            reasoning: String::new(),
+        }
+    }
+
+    fn fail_result(confidence: f64) -> ReviewResult {
+        ReviewResult { verdict: Verdict::Fail, ..pass(confidence) }
+    }
+
+    fn finding(file: &str, line: u32, rule: &str, sev: Severity) -> Finding {
+        Finding {
+            severity: sev,
+            location: CodeLocation { file: file.into(), line_start: line, line_end: line },
+            rule_id: rule.into(),
+            description: "desc".into(),
+            suggestion: "fix".into(),
+        }
+    }
+
+    fn pair(ra: Result<ReviewResult, ReviewError>, rb: Result<ReviewResult, ReviewError>) -> PairResult {
+        evaluate_pair(ra, rb, "A".into(), "B".into(), ReviewFocus::Security, 0, vec![])
+    }
+
+    // ── evaluate_pair ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pair_both_pass_high_confidence() {
+        assert!(pair(Ok(pass(0.95)), Ok(pass(0.92))).pair_passed);
+    }
+
+    #[test]
+    fn test_pair_one_verdict_fails() {
+        assert!(!pair(Ok(fail_result(0.95)), Ok(pass(0.95))).pair_passed);
+    }
+
+    #[test]
+    fn test_pair_low_confidence_blocks() {
+        assert!(!pair(Ok(pass(0.89)), Ok(pass(0.95))).pair_passed);
+    }
+
+    #[test]
+    fn test_pair_confidence_exactly_at_threshold_passes() {
+        assert!(pair(Ok(pass(CONFIDENCE_THRESHOLD)), Ok(pass(CONFIDENCE_THRESHOLD))).pair_passed);
+    }
+
+    #[test]
+    fn test_pair_reviewer_error_becomes_fail() {
+        let p = pair(Ok(pass(0.95)), Err(ReviewError::Completion("timeout".into())));
+        assert!(!p.pair_passed);
+        assert_eq!(p.result_b.verdict, Verdict::Fail);
+        assert_eq!(p.result_b.confidence, 1.0); // synthetic fail has confidence 1.0
+    }
+
+    // ── evaluate (gate) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_evaluate_all_groups_pass() {
+        let pairs = vec![
+            pair(Ok(pass(0.95)), Ok(pass(0.95))),
+            pair(Ok(pass(0.92)), Ok(pass(0.91))),
+        ];
+        let r = evaluate(pairs);
+        assert!(r.gate_passed);
+        assert_eq!(r.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn test_evaluate_one_group_fails_blocks_gate() {
+        let pairs = vec![
+            pair(Ok(pass(0.95)), Ok(pass(0.95))),
+            pair(Ok(fail_result(0.95)), Ok(pass(0.95))),
+        ];
+        let r = evaluate(pairs);
+        assert!(!r.gate_passed);
+        assert_eq!(r.verdict, Verdict::Fail);
+    }
+
+    // ── merge_and_dedup ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_same_key_higher_severity_wins() {
+        let low  = finding("f.rs", 5, "R1", Severity::Low);
+        let high = finding("f.rs", 5, "R1", Severity::High);
+        let merged = merge_and_dedup(&[low], &[high]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn test_dedup_different_line_both_kept() {
+        let a = finding("f.rs", 1, "R1", Severity::Low);
+        let b = finding("f.rs", 2, "R1", Severity::Low);
+        assert_eq!(merge_and_dedup(&[a], &[b]).len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_sorted_by_severity_descending() {
+        let low  = finding("f.rs", 1, "R1", Severity::Low);
+        let crit = finding("f.rs", 2, "R2", Severity::Critical);
+        let merged = merge_and_dedup(&[low], &[crit]);
+        assert_eq!(merged[0].severity, Severity::Critical);
+    }
+
+    // ── gate_failure_reason ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_gate_failure_reason_passed_returns_simple_string() {
+        let pairs = vec![pair(Ok(pass(0.95)), Ok(pass(0.95)))];
+        let r = evaluate(pairs);
+        assert_eq!(gate_failure_reason(&r), "Gate passed.");
+    }
+
+    #[test]
+    fn test_gate_failure_reason_mentions_focus() {
+        let pairs = vec![pair(Ok(fail_result(0.95)), Ok(pass(0.95)))];
+        let r = evaluate(pairs);
+        let reason = gate_failure_reason(&r);
+        assert!(reason.to_uppercase().contains("SECURITY"));
+    }
+}
+
 fn unwrap_or_fail(res: Result<ReviewResult, ReviewError>, label: &str) -> ReviewResult {
     match res {
         Ok(r) => r,

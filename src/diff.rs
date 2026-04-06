@@ -282,5 +282,107 @@ index abc1234..def5678 100644
         assert_eq!(parse_hunk_header("@@ -10,7 +10,9 @@ context"), Some((10, 9)));
         assert_eq!(parse_hunk_header("@@ -1 +1 @@"), Some((1, 1)));
         assert_eq!(parse_hunk_header("@@ -0,0 +1,5 @@"), Some((1, 5)));
+        assert_eq!(parse_hunk_header("not a hunk"), None);
+    }
+
+    #[test]
+    fn test_empty_diff_returns_empty() {
+        assert!(parse_diff("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_new_file_flag() {
+        let diff = "diff --git a/new.rs b/new.rs\n\
+                    new file mode 100644\n\
+                    --- /dev/null\n\
+                    +++ b/new.rs\n\
+                    @@ -0,0 +1 @@\n\
+                    +fn main() {}\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_new_file);
+        assert!(files[0].original_path.is_none());
+        assert!(files[0].has_changes());
+    }
+
+    #[test]
+    fn test_deleted_file_flag() {
+        let diff = "diff --git a/old.rs b/old.rs\n\
+                    deleted file mode 100644\n\
+                    --- a/old.rs\n\
+                    +++ /dev/null\n\
+                    @@ -1 +0,0 @@\n\
+                    -fn main() {}\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_deleted_file);
+        assert!(files[0].new_path.is_none());
+    }
+
+    #[test]
+    fn test_multi_file_diff() {
+        let diff = "diff --git a/a.rs b/a.rs\n\
+                    --- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n\
+                    diff --git a/b.rs b/b.rs\n\
+                    --- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].new_path.as_ref().unwrap().to_str().unwrap(), "a.rs");
+        assert_eq!(files[1].new_path.as_ref().unwrap().to_str().unwrap(), "b.rs");
+    }
+
+    #[test]
+    fn test_pure_rename_has_no_changes() {
+        // Rename-only: paths differ but no hunk, so has_changes() is false.
+        let diff = "diff --git a/old.rs b/new.rs\n\
+                    similarity index 100%\n\
+                    rename from old.rs\n\
+                    rename to new.rs\n\
+                    --- a/old.rs\n\
+                    +++ b/new.rs\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].has_changes());
+    }
+
+    #[test]
+    fn test_no_newline_marker_is_ignored() {
+        // Lines starting with `\` must not affect hunk line counts.
+        let diff = "diff --git a/x.rs b/x.rs\n\
+                    --- a/x.rs\n+++ b/x.rs\n\
+                    @@ -1 +1 @@\n\
+                    -old\n\
+                    \\ No newline at end of file\n\
+                    +new\n\
+                    \\ No newline at end of file\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].has_changes());
+    }
+
+    #[test]
+    fn test_hunk_range_added_only() {
+        // Simple hunk: one added line at the start (no context before it).
+        // @@ -1 +1,2 @@ → new file cursor starts at 1.
+        // `+line_a` and `+line_b` are both added → range [1, 2].
+        let diff = concat!(
+            "diff --git a/f.rs b/f.rs\n",
+            "--- a/f.rs\n",
+            "+++ b/f.rs\n",
+            "@@ -1 +1,2 @@\n",
+            "+line_a\n",
+            "+line_b\n",
+        );
+        let files = parse_diff(diff).unwrap();
+        let h = &files[0].hunks[0];
+        assert_eq!(h.start_line, 1);
+        assert_eq!(h.end_line, 2);
+    }
+
+    #[test]
+    fn test_parse_path_strips_prefix() {
+        assert_eq!(parse_path("a/src/lib.rs"), Some(PathBuf::from("src/lib.rs")));
+        assert_eq!(parse_path("b/src/lib.rs"), Some(PathBuf::from("src/lib.rs")));
+        assert_eq!(parse_path("/dev/null"), None);
     }
 }
