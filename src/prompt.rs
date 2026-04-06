@@ -1,6 +1,63 @@
 use crate::ast::{CallEdge, FileAstContext, Symbol, SymbolKind};
 use crate::models::REVIEW_JSON_SCHEMA;
 
+// ── Ignore annotations ────────────────────────────────────────────────────────
+
+/// A single `// ai-reviewer: ignore[RULE-ID]` annotation found in the diff.
+struct IgnoreAnnotation {
+    file: String,
+    rule_id: String,
+    reason: String,
+}
+
+/// Scan every added/context line in the diff for `ai-reviewer: ignore[RULE-ID]`
+/// comments (supports `//`, `#`, and `--` comment styles).
+fn extract_ignore_annotations(contexts: &[FileAstContext]) -> Vec<IgnoreAnnotation> {
+    let mut result = Vec::new();
+    for ctx in contexts {
+        for line in ctx.raw_diff.lines() {
+            // Only inspect lines that exist in the new file (added or context).
+            let content = if line.starts_with('+') && !line.starts_with("+++") {
+                &line[1..]
+            } else if line.starts_with(' ') {
+                &line[1..]
+            } else {
+                continue;
+            };
+            if let Some(ann) = parse_ignore_comment(content, &ctx.file) {
+                result.push(ann);
+            }
+        }
+    }
+    result
+}
+
+/// Parse a single line for the `ai-reviewer: ignore[RULE-ID]` marker.
+/// Supports optional reason text after the closing `]`, separated by `—`, `--`, or `-`.
+fn parse_ignore_comment(line: &str, file: &str) -> Option<IgnoreAnnotation> {
+    const MARKER: &str = "ai-reviewer: ignore[";
+    let pos = line.find(MARKER)?;
+    let rest = &line[pos + MARKER.len()..];
+    let close = rest.find(']')?;
+    let rule_id = rest[..close].trim().to_string();
+    if rule_id.is_empty() {
+        return None;
+    }
+    let after = rest[close + 1..].trim();
+    // Strip leading punctuation used as separator (—, --, -)
+    let reason = after
+        .trim_start_matches('—')
+        .trim_start_matches("--")
+        .trim_start_matches('-')
+        .trim()
+        .to_string();
+    Some(IgnoreAnnotation {
+        file: file.to_string(),
+        rule_id,
+        reason,
+    })
+}
+
 // ── Review focus ──────────────────────────────────────────────────────────────
 
 /// Each of the four review groups is assigned one exclusive focus dimension.
@@ -77,8 +134,17 @@ pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
 There are no human reviewers in this loop. Your findings directly gate production deployments.
 
 ## Your Mission
-Analyse the provided code diff and its surrounding AST context with extreme rigour.
-Detect every issue within your assigned focus area above. Be brutally honest — false negatives are catastrophic.
+Analyse the provided code diff and its surrounding AST context with rigour.
+Detect every **genuine** issue within your assigned focus area above.
+
+Both false negatives AND false positives carry real cost:
+- A missed real bug ships to production.
+- A false positive blocks a valid change, wastes developer time, and erodes trust in the tool.
+
+When you are uncertain whether a pattern is a real defect versus intentional design:
+- Prefer `verdict: "pass"` with `confidence` 0.80–0.89 and describe your uncertainty in `reasoning`.
+- Do NOT default to `verdict: "fail"` simply because you cannot prove the code is safe.
+- Reserve high-confidence `fail` for clear, unambiguous defects with no plausible legitimate interpretation.
 
 ## Company Security & Coding Policy
 {policy_text}
@@ -97,8 +163,9 @@ Field semantics:
 - `model_id`  : your model identifier string (e.g. "minimax-text-01")
 - `verdict`   : "pass" if code is safe to merge, "fail" otherwise
 - `confidence`: float 0.0–1.0 reflecting your certainty in the verdict
-  - Only report >= 0.9 if you are genuinely certain after thorough analysis
-  - If any ambiguity exists, report 0.7–0.89 (which will trigger a pipeline block)
+  - Set >= 0.90 only when you are genuinely certain the verdict is correct after thorough analysis
+  - If you suspect an issue but cannot rule out intentional design, set confidence 0.80–0.89 with `verdict: "pass"` and explain in `reasoning`
+  - Do NOT lower confidence on a `pass` verdict just because ambiguity exists — only lower it when you genuinely doubt your own verdict
 - `findings`  : every defect found, even INFO-level observations
 - `reasoning` : concise chain-of-thought (2–5 sentences) explaining your verdict
 
@@ -204,6 +271,29 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
         }
 
         out.push_str("---\n\n");
+    }
+
+    // ── Acknowledged exceptions ───────────────────────────────────────────
+    let annotations = extract_ignore_annotations(contexts);
+    if !annotations.is_empty() {
+        out.push_str("## Acknowledged Exceptions\n\n");
+        out.push_str(
+            "The developer has explicitly annotated the following patterns as intentional.\n\
+             Do NOT raise findings for these specific rule IDs at these locations.\n\
+             You may still note them in `reasoning` if you disagree, but they must NOT\n\
+             appear in `findings` and must NOT cause a `fail` verdict on their own.\n\n",
+        );
+        for ann in &annotations {
+            if ann.reason.is_empty() {
+                out.push_str(&format!("- `{}` — rule `{}`\n", ann.file, ann.rule_id));
+            } else {
+                out.push_str(&format!(
+                    "- `{}` — rule `{}`: {}\n",
+                    ann.file, ann.rule_id, ann.reason
+                ));
+            }
+        }
+        out.push('\n');
     }
 
     out.push_str(
