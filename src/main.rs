@@ -392,16 +392,20 @@ fn parse_threshold(s: &str) -> Result<f64, String> {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /// Resolve an API key: prefer explicit arg/env, then fall back to legacy env var.
+///
+/// `primary_env` is read by clap via `#[arg(env = "...")]` and arrives through
+/// `explicit`; it is listed here solely for the error message so users see both
+/// valid env var names when neither is set.
 fn resolve_api_key(
     explicit: Option<&str>,
-    _primary_env: &str,
+    primary_env: &str,
     legacy_env: &str,
 ) -> Result<String> {
     if let Some(k) = explicit {
         return Ok(k.to_owned());
     }
     std::env::var(legacy_env)
-        .with_context(|| format!("API key not set (tried {legacy_env})"))
+        .with_context(|| format!("API key not set (set {primary_env} or {legacy_env})"))
 }
 
 fn read_diff(path: &str) -> Result<String> {
