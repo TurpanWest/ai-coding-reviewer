@@ -1,4 +1,4 @@
-use crate::ast::{CallEdge, FileAstContext, Symbol, SymbolKind};
+use crate::ast::{CallEdge, FileAstContext, Symbol};
 use crate::models::REVIEW_JSON_SCHEMA;
 
 // ── Ignore annotations ────────────────────────────────────────────────────────
@@ -223,6 +223,8 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
     out.push_str("---\n\n");
 
     for ctx in contexts {
+        let lang = lang_from_file(&ctx.file);
+
         out.push_str(&format!("### File: `{}`\n\n", ctx.file));
 
         // ── Raw diff ──────────────────────────────────────────────────────
@@ -236,7 +238,7 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
         } else {
             out.push_str("#### Changed Symbols (full definition)\n\n");
             for sym in &ctx.changed_symbols {
-                out.push_str(&format_symbol(sym));
+                out.push_str(&format_symbol(sym, lang));
                 out.push('\n');
             }
         }
@@ -264,7 +266,7 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
             if !callee_syms.is_empty() {
                 out.push_str("\n#### Callee Definitions (same file, for context)\n\n");
                 for sym in callee_syms {
-                    out.push_str(&format_symbol(sym));
+                    out.push_str(&format_symbol(sym, lang));
                     out.push('\n');
                 }
             }
@@ -352,16 +354,34 @@ The original review request for context:
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
-fn format_symbol(sym: &Symbol) -> String {
-    let lang = match sym.kind {
-        SymbolKind::Function => "rust",
-        SymbolKind::ImplBlock => "rust",
-        _ => "rust",
-    };
+fn format_symbol(sym: &Symbol, lang: &str) -> String {
     format!(
         "**`{}` {} (lines {}–{})**\n```{}\n{}\n```\n",
         sym.name, sym.kind, sym.start_line, sym.end_line, lang, sym.source
     )
+}
+
+/// Map a file path's extension to the corresponding Markdown code-fence language tag.
+/// Must stay in sync with `ast::detect_language`.
+fn lang_from_file(file: &str) -> &'static str {
+    match std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("rs")                                                  => "rust",
+        Some("py")                                                  => "python",
+        Some("go")                                                  => "go",
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs")       => "javascript",
+        Some("ts") | Some("tsx")                                    => "typescript",
+        Some("java")                                                => "java",
+        Some("c") | Some("h")                                       => "c",
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("hxx") => "cpp",
+        Some("rb")                                                  => "ruby",
+        Some("cs")                                                  => "csharp",
+        Some("sh") | Some("bash")                                   => "bash",
+        Some("scala") | Some("sc")                                  => "scala",
+        _                                                           => "text",
+    }
 }
 
 fn group_edges_by_caller(
@@ -487,6 +507,48 @@ mod tests {
         let p = build_correction_prompt("original", "{bad json}", "unexpected token", 2, 4);
         assert!(p.contains("2/4"));
         assert!(p.contains("unexpected token"));
+    }
+
+    // ── lang_from_file ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lang_from_file_known_extensions() {
+        assert_eq!(lang_from_file("src/main.rs"), "rust");
+        assert_eq!(lang_from_file("app.py"), "python");
+        assert_eq!(lang_from_file("main.go"), "go");
+        assert_eq!(lang_from_file("index.js"), "javascript");
+        assert_eq!(lang_from_file("app.jsx"), "javascript");
+        assert_eq!(lang_from_file("mod.ts"), "typescript");
+        assert_eq!(lang_from_file("comp.tsx"), "typescript");
+        assert_eq!(lang_from_file("Foo.java"), "java");
+        assert_eq!(lang_from_file("main.c"), "c");
+        assert_eq!(lang_from_file("main.cpp"), "cpp");
+        assert_eq!(lang_from_file("lib.rb"), "ruby");
+        assert_eq!(lang_from_file("Program.cs"), "csharp");
+        assert_eq!(lang_from_file("script.sh"), "bash");
+        assert_eq!(lang_from_file("Main.scala"), "scala");
+    }
+
+    #[test]
+    fn test_lang_from_file_unknown_extension_is_text() {
+        assert_eq!(lang_from_file("data.json"), "text");
+        assert_eq!(lang_from_file("Makefile"), "text");
+        assert_eq!(lang_from_file("no_ext"), "text");
+    }
+
+    #[test]
+    fn test_format_symbol_uses_correct_lang_fence() {
+        use crate::ast::{Symbol, SymbolKind};
+        let sym = Symbol {
+            name: "authenticate".into(),
+            kind: SymbolKind::Function,
+            start_line: 10,
+            end_line: 15,
+            source: "def authenticate(token):\n    pass".into(),
+        };
+        let out = format_symbol(&sym, "python");
+        assert!(out.contains("```python"), "expected python fence, got: {out}");
+        assert!(!out.contains("```rust"), "should not have rust fence: {out}");
     }
 
     // ── ReviewFocus::as_str ───────────────────────────────────────────────────
