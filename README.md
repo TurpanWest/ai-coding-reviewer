@@ -1,16 +1,14 @@
 # ai-reviewer
 
-> **Work in Progress** — under active development.
-
-AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff across Security, Correctness, Performance, and Maintainability. All four checks must pass with high confidence, or the merge is blocked.
+AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must pass with confidence ≥ 0.90 or the merge is blocked.
 
 ---
 
-## Add to your repo in 3 steps
+## Quick start (3 steps)
 
-### 1. Create the workflow file
+### 1. Add the workflow
 
-Add `.github/workflows/ai-review.yml` to your repo:
+Copy `.github/workflows/ai-review.yml` to your repo:
 
 ```yaml
 name: AI Code Review
@@ -23,37 +21,44 @@ jobs:
   ai-review:
     name: AI Review Gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build ai-reviewer
+      - name: Pull reviewer image
         run: |
-          git clone https://github.com/TurpanWest/ai-coding-reviewer.git /tmp/ai-reviewer
-          cd /tmp/ai-reviewer && cargo build --release
-          cp /tmp/ai-reviewer/target/release/ai-reviewer /usr/local/bin/ai-reviewer
+          docker pull ghcr.io/${{ github.repository }}:latest || \
+            docker build -t ghcr.io/${{ github.repository }}:latest .
 
       - name: Generate diff
-        run: git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+        run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
 
       - name: Run AI review
         env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
+          REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
         run: |
-          ai-reviewer \
-            --diff /tmp/pr.diff \
-            --policy .github/review-policy.md \
-            --output review-report.md
-
-      - name: Print report
-        if: always()
-        run: cat review-report.md
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            -e REVIEWER_1_API_KEY \
+            -e REVIEWER_2_API_KEY \
+            ghcr.io/${{ github.repository }}:latest \
+            --diff /repo/pr.diff \
+            --policy /repo/policy.md \
+            --source-root /repo \
+            --output /repo/review-report.md
 
       - name: Upload report
         if: always()
@@ -65,7 +70,7 @@ jobs:
 
 ### 2. Add a policy file
 
-Create `.github/review-policy.md` — this is your ruleset, injected into the LLM prompt:
+Create `policy.md` in your repo root. This is injected verbatim into the LLM prompt:
 
 ```markdown
 ## Security
@@ -74,76 +79,146 @@ Create `.github/review-policy.md` — this is your ruleset, injected into the LL
 
 ## Correctness
 - LOGIC-001: Every error must be handled or explicitly propagated
-- LOGIC-002: Async tasks must not hold locks across await points
 ```
 
-See [`review-policy.example.md`](review-policy.example.md) for a fuller starting point.
+See [`review-policy.example.md`](review-policy.example.md) for a full template.
 
-### 3. Add API keys and enable branch protection
+### 3. Add secrets and enable branch protection
 
-**Add secrets** — go to your repo → Settings → Secrets and variables → Actions:
+**Secrets** — repo Settings → Secrets and variables → Actions:
 
-| Secret | Where to get it |
+| Secret | Description |
 |---|---|
-| `MINIMAX_API_KEY` | [minimax.chat](https://www.minimax.chat) |
-| `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) |
+| `REVIEWER_1_API_KEY` | API key for the first reviewer model |
+| `REVIEWER_2_API_KEY` | API key for the second reviewer model |
 
-**Enable branch protection** — Settings → Branches → Add classic branch protection rule:
-- Branch name pattern: `main`
-- Check **Require status checks to pass before merging**
-- Search for and add: **`AI Review Gate`**
-
-That's it. Any PR targeting `main` will now be blocked until both models pass.
+**Branch protection** — Settings → Branches → Add rule:
+- Branch: `main`
+- Enable **Require status checks to pass before merging**
+- Add status check: **`AI Review Gate`**
 
 ---
 
-## Using different providers
+## Changing providers
 
-The default is MiniMax + DeepSeek. You can swap either slot to any supported provider:
+By default both reviewers use the same provider. Override either slot via env vars:
 
-| Provider | Secret name | `--reviewer-N` value | Default model |
-|---|---|---|---|
-| MiniMax | `MINIMAX_API_KEY` | `minimax` | `MiniMax-M2.7` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek-chat` |
-| Anthropic | `ANTHROPIC_API_KEY` | `anthropic` | `claude-sonnet-4-6` |
-| Google Gemini | `GEMINI_API_KEY` | `gemini` | `gemini-3.1-pro-preview` |
-| OpenAI | `OPENAI_API_KEY` | `openai` | `gpt-5.4` |
+| Variable | Purpose |
+|---|---|
+| `REVIEWER_1_BASE_URL` | OpenAI-compat base URL for reviewer 1 |
+| `REVIEWER_2_BASE_URL` | OpenAI-compat base URL for reviewer 2 |
+| `REVIEWER_1_MODEL` | Model ID for reviewer 1 |
+| `REVIEWER_2_MODEL` | Model ID for reviewer 2 |
 
-Example — swap reviewer 2 to Anthropic:
-
-```yaml
-      - name: Run AI review
-        env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          ai-reviewer \
-            --diff /tmp/pr.diff \
-            --policy .github/review-policy.md \
-            --reviewer-2 anthropic \
-            --reviewer-2-model claude-opus-4-6
-```
+Any provider with an OpenAI-compatible `/v1/chat/completions` endpoint works (MiniMax, DeepSeek, Anthropic via proxy, Gemini, OpenAI, local Ollama, etc.).
 
 ---
 
 ## How it works
 
-Each PR diff is distributed across up to 4 focus groups (one per changed file, round-robin). Every group runs two models in parallel:
-
 ```
-PR diff → 4 focus groups (Security · Correctness · Performance · Maintainability)
-              each group: Model A + Model B run concurrently
-                              ↓
-                     both must return PASS with confidence ≥ 0.90
-                              ↓
-                     review-report.md  +  exit 0 / 1
+PR diff
+  └─ parse → AST context extraction (13 languages)
+       └─ prompt assembly (system: policy + schema | user: diff + symbols)
+            └─ Model A ──┐
+                          ├─ consensus: both PASS + confidence ≥ 0.90?
+            └─ Model B ──┘
+                 └─ review-report.md  +  exit 0 (PASS) / 1 (FAIL) / 2 (error)
 ```
 
-- Exit `0` — all groups passed → merge allowed
-- Exit `1` — any group failed → merge blocked
-- Exit `2` — fatal error (missing keys, diff too large, etc.)
+- Both models run **concurrently** and review the same diff independently.
+- A finding is reported only when **both models agree** on the same file + line + rule.
+- Transient errors (timeout, 5xx, 429) are **retried with exponential backoff**; auth errors (401, 403, 404) fail fast.
+- AST context (full symbol definitions + call graph) is attached for 13 languages: Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala. Other languages are diff-only.
 
-Supports 13 languages with AST context (Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala). Other languages are reviewed diff-only.
+---
+
+## Local usage
+
+```bash
+# Requires REVIEWER_1_API_KEY and REVIEWER_2_API_KEY in env
+cargo run -- --diff path/to/file.diff --policy policy.md --source-root .
+
+# From stdin
+git diff HEAD~1 | cargo run -- --diff - --policy policy.md
+
+# Verbose
+cargo run -- --diff - --policy policy.md -v
+```
+
+Exit codes: `0` = PASS, `1` = FAIL, `2` = fatal error.
+
+---
+
+## For AI tools
+
+<!-- ai-reviewer:meta
+This section is machine-readable context for AI coding assistants (Claude, Copilot, Cursor, etc.)
+reading this repository. Human readers can skip it.
+-->
+
+```yaml
+tool: ai-reviewer
+type: CLI binary / Docker image
+language: Rust
+purpose: >
+  Dual-LLM code review gate. Parses a unified diff, extracts AST context,
+  sends to two LLM models in parallel, and produces PASS/FAIL + Markdown report.
+
+interface:
+  binary: ai-reviewer
+  docker: ghcr.io/<owner>/<repo>:latest
+  args:
+    --diff:        path to unified diff file, or "-" to read from stdin (required)
+    --policy:      path to Markdown policy file injected into the system prompt (required)
+    --source-root: repo root for AST context extraction and tool-call file access (optional)
+    --output:      path for the Markdown report (default: review-report.md)
+    -v/--verbose:  enable verbose tracing output
+
+env_vars:
+  required:
+    REVIEWER_1_API_KEY: API key for the first LLM reviewer
+    REVIEWER_2_API_KEY: API key for the second LLM reviewer
+  optional:
+    REVIEWER_1_BASE_URL: OpenAI-compat base URL (default: provider-specific)
+    REVIEWER_2_BASE_URL: OpenAI-compat base URL (default: provider-specific)
+    REVIEWER_1_MODEL:    model ID override for reviewer 1
+    REVIEWER_2_MODEL:    model ID override for reviewer 2
+    RUST_LOG:            tracing filter, e.g. "ai_reviewer=debug"
+
+exit_codes:
+  0: consensus PASS — both models passed with confidence >= 0.90
+  1: consensus FAIL — any model failed or confidence below threshold
+  2: fatal error — bad diff path, missing policy file, diff too large, etc.
+
+outputs:
+  stdout: single summary line (PASS/FAIL + finding count)
+  stderr: gate-fail message when exit code is 1
+  file:   full Markdown cross-comparison report (default: review-report.md)
+
+key_source_files:
+  src/main.rs:          CLI entrypoint, provider wiring, concurrent orchestration
+  src/diff.rs:          unified diff parser → FileDiff / HunkRange
+  src/ast.rs:           tree-sitter AST extraction + call graph (13 languages)
+  src/prompt.rs:        system prompt + user prompt assembly
+  src/models/reviewer.rs: shared retry loop, JSON self-correction, strip helpers
+  src/models/mod.rs:    ReviewResult / ConsensusResult types + JSON schema
+  src/consensus.rs:     PASS/FAIL gate logic, finding dedup
+  src/report.rs:        Markdown report renderer
+  src/tools.rs:         LLM tool implementations (read_file, find_symbol)
+  src/telemetry.rs:     Prometheus metrics export
+
+consensus_rule: >
+  PASS only when BOTH models return Verdict::Pass AND both confidence >= 0.90.
+  Any ReviewError becomes a synthetic Verdict::Fail with confidence=1.0.
+  Finding dedup key: (file, line_start, rule_id).
+
+retry_policy: >
+  Up to max_retries+1 attempts per LLM call.
+  Retryable: timeout, 5xx, 429, network reset — exponential backoff 1s→2s→4s→8s→16s.
+  Non-retryable: 401, 403, 404, invalid API key — fail immediately.
+  JSON parse failure also retries with a self-correction prompt (self-contained, no history accumulation).
+```
 
 ---
 
