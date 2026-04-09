@@ -133,9 +133,9 @@ where
                 "LLM call start"
             );
 
-            // Hard per-call timeout: if the LLM hangs, we don't block the CI
-            // worker forever — we convert the timeout into a ReviewError so the
-            // consensus engine can handle it as a synthetic FAIL.
+            // Hard per-call timeout per attempt.  Timeouts and transient 5xx
+            // errors are retried (up to max_retries); only non-retryable 4xx
+            // errors (bad API key, wrong model ID) short-circuit immediately.
             //
             // When tools are registered, use `agent.prompt()` — Rig's Prompt
             // trait handles the full multi-turn tool-call loop internally and
@@ -241,6 +241,10 @@ where
                     Ok(s) => s,
                     Err(e) => {
                         warn!(attempt, label = %self.label, error = %e, "Tool call loop failed");
+                        if is_retryable_review_error(&e) {
+                            last_error = e.to_string();
+                            continue;
+                        }
                         return Err(e);
                     }
                 }
@@ -252,14 +256,28 @@ where
                 .await;
                 match result {
                     Err(_) => {
+                        // Timeout is always retryable — transient network jitter
+                        // or provider overload. Continue to the next attempt.
                         let msg = format!(
                             "Timeout after {}s waiting for LLM response",
                             self.timeout_secs
                         );
-                        warn!(attempt, label = %self.label, timeout_secs = self.timeout_secs, "LLM call timed out");
-                        return Err(ReviewError::Completion(msg));
+                        warn!(attempt, label = %self.label, timeout_secs = self.timeout_secs, "LLM call timed out — will retry");
+                        last_error = msg;
+                        continue;
                     }
-                    Ok(Err(e)) => return Err(ReviewError::Completion(e.to_string())),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        if !is_retryable_api_error(&msg) {
+                            // Auth failures and malformed-request errors (4xx) will
+                            // not improve on retry — fail fast.
+                            warn!(attempt, label = %self.label, error = %msg, "Non-retryable API error");
+                            return Err(ReviewError::Completion(msg));
+                        }
+                        warn!(attempt, label = %self.label, error = %msg, "Retryable API error — will retry");
+                        last_error = msg;
+                        continue;
+                    }
                     Ok(Ok(s)) => s,
                 }
             };
@@ -408,6 +426,44 @@ fn strip_json_fences(raw: &str) -> &str {
     trimmed
 }
 
+// ── Retry helpers ─────────────────────────────────────────────────────────────
+
+/// Returns `true` when an API error message represents a transient failure that
+/// is worth retrying.
+///
+/// Only 4xx errors that cannot improve on retry are excluded:
+/// - 401 / 403: bad API key or missing permission — retrying with the same key
+///   will always fail.
+/// - 404: wrong model ID or endpoint path — structural misconfiguration.
+///
+/// Everything else — 5xx server errors, 429 rate limits, network resets, and
+/// timeouts — is treated as transient and eligible for the backoff retry loop.
+fn is_retryable_api_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    let non_retryable = [
+        "401",
+        "403",
+        "404",
+        "unauthorized",
+        "forbidden",
+        "invalid api key",
+        "invalid_api_key",
+        "permission denied",
+        "not found",
+    ];
+    !non_retryable.iter().any(|s| lower.contains(s))
+}
+
+/// Convenience wrapper over [`is_retryable_api_error`] for a full `ReviewError`.
+fn is_retryable_review_error(e: &ReviewError) -> bool {
+    match e {
+        ReviewError::Completion(msg) => is_retryable_api_error(msg),
+        // MaxRetriesExceeded should never be produced inside the retry loop,
+        // but treat it as non-retryable to avoid a double-retry loop.
+        ReviewError::MaxRetriesExceeded { .. } => false,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -454,5 +510,79 @@ mod tests {
     fn test_strip_fences_no_fence_returns_trimmed() {
         let raw = "  {\"verdict\":\"pass\"}  ";
         assert_eq!(strip_json_fences(raw), "{\"verdict\":\"pass\"}");
+    }
+
+    // ── is_retryable_api_error ────────────────────────────────────────────────
+
+    #[test]
+    fn test_non_retryable_401() {
+        assert!(!is_retryable_api_error("HTTP 401 Unauthorized"));
+        assert!(!is_retryable_api_error("error: unauthorized access"));
+    }
+
+    #[test]
+    fn test_non_retryable_403() {
+        assert!(!is_retryable_api_error("403 Forbidden"));
+        assert!(!is_retryable_api_error("permission denied for model"));
+    }
+
+    #[test]
+    fn test_non_retryable_404() {
+        assert!(!is_retryable_api_error("404 model not found"));
+        assert!(!is_retryable_api_error("The requested model was not found"));
+    }
+
+    #[test]
+    fn test_non_retryable_invalid_api_key() {
+        assert!(!is_retryable_api_error("Invalid API key provided"));
+        assert!(!is_retryable_api_error("invalid_api_key: check your credentials"));
+    }
+
+    #[test]
+    fn test_retryable_timeout() {
+        assert!(is_retryable_api_error("Timeout after 120s waiting for LLM response"));
+    }
+
+    #[test]
+    fn test_retryable_5xx() {
+        assert!(is_retryable_api_error("HTTP 500 Internal Server Error"));
+        assert!(is_retryable_api_error("502 Bad Gateway"));
+        assert!(is_retryable_api_error("503 Service Unavailable"));
+    }
+
+    #[test]
+    fn test_retryable_429_rate_limit() {
+        assert!(is_retryable_api_error("429 Too Many Requests"));
+        assert!(is_retryable_api_error("rate limit exceeded, retry after 5s"));
+    }
+
+    #[test]
+    fn test_retryable_network_error() {
+        assert!(is_retryable_api_error("connection reset by peer"));
+        assert!(is_retryable_api_error("error sending request: connection refused"));
+    }
+
+    // ── is_retryable_review_error ─────────────────────────────────────────────
+
+    #[test]
+    fn test_retryable_review_error_completion_timeout() {
+        let e = ReviewError::Completion("Timeout after 120s".into());
+        assert!(is_retryable_review_error(&e));
+    }
+
+    #[test]
+    fn test_non_retryable_review_error_completion_401() {
+        let e = ReviewError::Completion("401 Unauthorized".into());
+        assert!(!is_retryable_review_error(&e));
+    }
+
+    #[test]
+    fn test_non_retryable_review_error_max_retries() {
+        let e = ReviewError::MaxRetriesExceeded {
+            attempts: 4,
+            parse_error: "bad json".into(),
+            raw: "{}".into(),
+        };
+        assert!(!is_retryable_review_error(&e));
     }
 }
