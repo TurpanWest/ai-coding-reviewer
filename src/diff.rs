@@ -13,15 +13,15 @@ pub struct HunkRange {
 
 /// Everything we extracted from one file's diff.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileDiff {
     /// Path as it appears in the `--- a/…` header (None for /dev/null).
     pub original_path: Option<PathBuf>,
     /// Path as it appears in the `+++ b/…` header (None for /dev/null).
     pub new_path: Option<PathBuf>,
     pub hunks: Vec<HunkRange>,
-    pub is_new_file: bool,
-    pub is_deleted_file: bool,
+    /// The raw unified-diff text for this one file, captured during parsing.
+    /// Includes the `diff --git`, `---`, `+++`, `@@` headers and all hunk lines.
+    pub raw_chunk: String,
 }
 
 impl FileDiff {
@@ -42,9 +42,9 @@ impl FileDiff {
 /// Parse a unified diff string (e.g. the output of `git diff`) into a list of
 /// per-file descriptors.
 ///
-/// We implement the parser manually instead of relying on `diffy`'s internal
-/// types so that we have precise control over the line-number extraction and
-/// can handle edge cases (new-file, deleted-file, binary diffs).
+/// We implement the parser manually rather than pulling in a full diff crate
+/// because we only need line-number extraction plus per-file raw-chunk capture,
+/// and want precise control over edge cases (new-file, deleted-file, binary).
 pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
     let mut results: Vec<FileDiff> = Vec::new();
 
@@ -52,8 +52,7 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
     let mut orig_path: Option<PathBuf> = None;
     let mut new_path: Option<PathBuf> = None;
     let mut hunks: Vec<HunkRange> = Vec::new();
-    let mut is_new_file = false;
-    let mut is_deleted_file = false;
+    let mut raw_chunk = String::new();
 
     // Inside a hunk: track the current new-file line cursor and whether we
     // have seen at least one `+` line (to build the tight range).
@@ -80,15 +79,13 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
                       orig: &mut Option<PathBuf>,
                       new: &mut Option<PathBuf>,
                       hunks: &mut Vec<HunkRange>,
-                      is_new: &mut bool,
-                      is_del: &mut bool| {
+                      raw: &mut String| {
         if orig.is_some() || new.is_some() {
             results.push(FileDiff {
                 original_path: orig.take(),
                 new_path: new.take(),
                 hunks: std::mem::take(hunks),
-                is_new_file: std::mem::take(is_new),
-                is_deleted_file: std::mem::take(is_del),
+                raw_chunk: std::mem::take(raw),
             });
         }
     };
@@ -97,40 +94,27 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
         // ── New file header ────────────────────────────────────────────────
         if line.starts_with("diff --git ") {
             // Flush any previous hunk and file
-            flush_hunk(
-                &mut hunks,
-                &mut hunk_first_change,
-                &mut hunk_last_change,
-            );
+            flush_hunk(&mut hunks, &mut hunk_first_change, &mut hunk_last_change);
             flush_file(
                 &mut results,
                 &mut orig_path,
                 &mut new_path,
                 &mut hunks,
-                &mut is_new_file,
-                &mut is_deleted_file,
+                &mut raw_chunk,
             );
             in_hunk = false;
+            raw_chunk.push_str(line);
+            raw_chunk.push('\n');
             continue;
         }
 
-        if line.starts_with("new file mode") {
-            is_new_file = true;
-            continue;
-        }
-
-        if line.starts_with("deleted file mode") {
-            is_deleted_file = true;
-            continue;
-        }
+        // Capture every line that belongs to the current file chunk.
+        raw_chunk.push_str(line);
+        raw_chunk.push('\n');
 
         // ── --- / +++ headers ─────────────────────────────────────────────
         if let Some(rest) = line.strip_prefix("--- ") {
-            flush_hunk(
-                &mut hunks,
-                &mut hunk_first_change,
-                &mut hunk_last_change,
-            );
+            flush_hunk(&mut hunks, &mut hunk_first_change, &mut hunk_last_change);
             in_hunk = false;
             orig_path = parse_path(rest);
             continue;
@@ -144,11 +128,7 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
         // ── @@ hunk header ────────────────────────────────────────────────
         // Format: @@ -L[,S] +L[,S] @@[ optional context ]
         if line.starts_with("@@") {
-            flush_hunk(
-                &mut hunks,
-                &mut hunk_first_change,
-                &mut hunk_last_change,
-            );
+            flush_hunk(&mut hunks, &mut hunk_first_change, &mut hunk_last_change);
             match parse_hunk_header(line) {
                 Some((new_start, _new_len)) => {
                     in_hunk = true;
@@ -192,18 +172,13 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<FileDiff>> {
     }
 
     // Flush tail
-    flush_hunk(
-        &mut hunks,
-        &mut hunk_first_change,
-        &mut hunk_last_change,
-    );
+    flush_hunk(&mut hunks, &mut hunk_first_change, &mut hunk_last_change);
     flush_file(
         &mut results,
         &mut orig_path,
         &mut new_path,
         &mut hunks,
-        &mut is_new_file,
-        &mut is_deleted_file,
+        &mut raw_chunk,
     );
 
     Ok(results)
@@ -291,7 +266,7 @@ index abc1234..def5678 100644
     }
 
     #[test]
-    fn test_new_file_flag() {
+    fn test_new_file() {
         let diff = "diff --git a/new.rs b/new.rs\n\
                     new file mode 100644\n\
                     --- /dev/null\n\
@@ -300,13 +275,12 @@ index abc1234..def5678 100644
                     +fn main() {}\n";
         let files = parse_diff(diff).unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files[0].is_new_file);
         assert!(files[0].original_path.is_none());
         assert!(files[0].has_changes());
     }
 
     #[test]
-    fn test_deleted_file_flag() {
+    fn test_deleted_file() {
         let diff = "diff --git a/old.rs b/old.rs\n\
                     deleted file mode 100644\n\
                     --- a/old.rs\n\
@@ -315,8 +289,21 @@ index abc1234..def5678 100644
                     -fn main() {}\n";
         let files = parse_diff(diff).unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files[0].is_deleted_file);
         assert!(files[0].new_path.is_none());
+    }
+
+    #[test]
+    fn test_raw_chunk_captured_per_file() {
+        let diff = "diff --git a/a.rs b/a.rs\n\
+                    --- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n\
+                    diff --git a/b.rs b/b.rs\n\
+                    --- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let files = parse_diff(diff).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].raw_chunk.contains("a/a.rs"));
+        assert!(!files[0].raw_chunk.contains("a/b.rs"));
+        assert!(files[1].raw_chunk.contains("a/b.rs"));
+        assert!(!files[1].raw_chunk.contains("a/a.rs"));
     }
 
     #[test]

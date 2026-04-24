@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 // ── Shared safety limit ───────────────────────────────────────────────────────
@@ -28,7 +28,6 @@ pub struct ReadFileArgs {
     pub end_line: Option<usize>,
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct ReadFileTool {
     source_root: PathBuf,
 }
@@ -129,7 +128,6 @@ pub struct FindSymbolArgs {
     pub file: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct FindSymbolTool {
     source_root: PathBuf,
 }

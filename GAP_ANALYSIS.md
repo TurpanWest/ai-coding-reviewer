@@ -1,8 +1,8 @@
 # 生产级别差距分析
 
 > 目标标准：大厂生产级高可用 / 高可靠 / 高性能 CLI + CI/CD 工具
-> 当前状态：功能完整的 Rust CLI，~4700 行，51 个单元测试，5 种 LLM provider，工具调用增强审查
-> 更新日期：2026-04-09
+> 当前状态：功能完整的 Rust CLI，~4700 行，72 个单元测试，5 种 LLM provider，工具调用增强审查
+> 更新日期：2026-04-10
 
 ---
 
@@ -32,7 +32,7 @@
 | `consensus.rs` | ✅ 12 个测试 | PASS/FAIL 边界、confidence 阈值、finding 去重、gate_failure_reason |
 | `prompt.rs` | ✅ 11 个测试 | ignore 注解解析、user prompt 构造、correction prompt、ReviewFocus |
 | `report.rs` | ✅ 7 个测试 | Markdown 渲染、badge、finding 表格、PASS/FAIL 输出 |
-| `models/reviewer.rs` | ✅ 9 个测试 | strip_think_block（正常/截断/无）、strip_json_fences（各格式） |
+| `models/reviewer.rs` | ✅ 22 个测试 | strip_think_block（正常/截断/无）、strip_json_fences（各格式）、is_retryable_api_error（401/403/404/key/5xx/429/timeout/network）、is_retryable_review_error |
 | `tools.rs` | ✅ 12 个测试 | safe_join 路径穿越、read_file 全文/分页/截断/遍历、find_symbol |
 | `diff.rs` | ✅ 有测试 | diff 解析 happy path |
 | `ast.rs` | ✅ 有测试 | AST 提取 |
@@ -84,14 +84,13 @@
 
 ## 二、可靠性与容错
 
-### 2.1 超时后无重试 🔴 高优先级
+### 2.1 超时与瞬态错误重试 ✅ 已完成
 
-**现状**：LLM 调用超时后直接返回 `Err(ReviewError::Completion(...))` 并立即退出重试循环（`reviewer.rs:255–263`），进入 consensus 计为 FAIL，整个 review 失败。  
-**问题**：LLM API 偶发超时是常态（网络抖动、provider 负载），一次超时导致 PR 被 block 不合理。
+**已改善**：在 `reviewer.rs` 中引入 `is_retryable_api_error` / `is_retryable_review_error` 两个辅助函数，将错误分为两类：
+- **可重试**：超时、5xx 服务端错误、429 限流、网络重置 — `continue` 进入下一次重试
+- **不可重试**：401 / 403 / 404 / 无效 API Key — 立即 `return Err` 快速失败
 
-**任务**：
-- [ ] 在 `do_review` 中区分超时错误与 API 错误：超时应继续重试循环而非立即 `return Err`
-- [ ] 区分 "超时" 和 "API 返回错误"：超时可重试，4xx 不重试，5xx 有限重试
+超时不再直接返回 `ReviewError::Completion`，而是更新 `last_error` 后继续重试循环，与 JSON 解析失败的退避重试统一处理。两个函数均有 13 个单元测试覆盖所有分支。
 
 ### 2.2 缺少 Provider 级别 Fallback 🟡 中优先级
 
@@ -101,13 +100,12 @@
 - [ ] 支持 `--reviewer-1-fallback` 参数，指定备用 provider
 - [ ] 在 `LlmReviewer` 中实现 fallback 逻辑：主 provider 连续失败 N 次后切换
 
-### 2.3 缺少 Rate Limit 处理 🟡 中优先级
+### 2.3 Rate Limit 处理（部分完成）🟡 中优先级
 
-**现状**：8 个 LLM 调用并发发起，若 provider 有 rate limit（如 DeepSeek 免费层），会收到 429 响应，当前代码将 429 作为普通 `Completion` 错误处理，不识别 `Retry-After` 头。
+**已改善**：429 响应现在被 `is_retryable_api_error` 识别为可重试错误，会进入指数退避重试循环，不再直接 FAIL。
 
-**任务**：
-- [ ] 在 HTTP 错误处理中识别 429 状态码
-- [ ] 解析 `Retry-After` 响应头，在指定时间后重试
+**仍缺失**：
+- [ ] 解析 `Retry-After` 响应头，按 header 指定时间等待而非固定退避
 - [ ] 支持 `--concurrent-reviews` 参数，限制同时在途的 LLM 调用数
 
 ### 2.4 self-correction 循环已修复 ✅ 已完成
@@ -307,6 +305,7 @@
 - ✅ **工具调用增强**：LLM 可通过 `read_file` / `find_symbol` 工具在审查时主动获取额外上下文（最多 8 轮工具调用）
 - ✅ **多语言 AST**：支持 12 种语言（Rust、Python、Go、JavaScript、TypeScript、Java、C、C++、Ruby、C#、Bash、Scala）
 - ✅ **self-correction 自包含**：每次重试使用独立的自包含 prompt，不累积对话历史，避免 token 膨胀
+- ✅ **智能重试分类**：`is_retryable_api_error` 区分瞬态错误（5xx/429/超时/网络）与永久错误（401/403/404），瞬态错误退避重试，永久错误立即快速失败
 - ✅ **Prometheus metrics 导出**：支持 textfile sink（node_exporter）和 Pushgateway 两个导出方式
 - ✅ **Diff 大小防护**：超限 fast-fail 而非静默截断
 - ✅ **Finding 去重**：`(file, line_start, rule_id)` 三元组去重，避免重复报告
@@ -323,7 +322,7 @@
 1. `cargo audit` + `cargo deny` 加入 CI
 2. 新增 `ci.yml` workflow：`cargo clippy -- -D warnings` + `cargo fmt --check`
 3. 集成测试改为 `cargo test` 可运行（引入 `wiremock`）
-4. 超时触发重试而非直接 FAIL（`reviewer.rs` do_review 中的超时分支）
+4. ~~超时触发重试而非直接 FAIL~~ ✅ 已完成（`is_retryable_api_error` + `is_retryable_review_error`）
 
 ### 下一阶段（中优先级，需设计）
 

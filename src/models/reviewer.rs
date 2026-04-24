@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rig::completion::{Chat, Completion, CompletionModel};
+use rig::completion::{Completion, CompletionModel};
 use rig::tool::Tool;
 use rig::completion::message::{
     AssistantContent, Message, ToolResultContent, UserContent,
@@ -18,9 +18,7 @@ use tracing::{debug, info, warn, Instrument};
 
 use crate::ast::FileAstContext;
 use crate::models::{ReviewError, ReviewFocus, ReviewResult};
-use crate::prompt::{
-    build_correction_prompt, build_system_prompt, build_system_prompt_with_tools, build_user_prompt,
-};
+use crate::prompt::{build_correction_prompt, build_system_prompt, build_user_prompt};
 use crate::tools::{FindSymbolTool, ReadFileTool};
 
 // ── Public struct ─────────────────────────────────────────────────────────────
@@ -35,9 +33,9 @@ pub struct LlmReviewer<M: CompletionModel> {
     /// Provider-specific extra parameters merged into every completion request
     /// (e.g. `{"cache_control": {"type": "ephemeral"}}` for Anthropic prefix caching).
     extra_params: Option<serde_json::Value>,
-    /// When `Some`, the reviewer registers `read_file` / `find_symbol` tools
-    /// and uses `agent.prompt()` so the LLM can fetch additional context.
-    source_root: Option<PathBuf>,
+    /// Repository root used by the `read_file` / `find_symbol` tools the
+    /// reviewer registers on every call.
+    source_root: PathBuf,
 }
 
 impl<M: CompletionModel + Clone> LlmReviewer<M> {
@@ -48,7 +46,7 @@ impl<M: CompletionModel + Clone> LlmReviewer<M> {
         focus: ReviewFocus,
         timeout_secs: u64,
         extra_params: Option<serde_json::Value>,
-        source_root: Option<PathBuf>,
+        source_root: PathBuf,
     ) -> Self {
         Self {
             model,
@@ -75,30 +73,26 @@ where
         contexts: &[FileAstContext],
         policy_text: &str,
     ) -> Result<ReviewResult, ReviewError> {
-        let (system_prompt, use_tools) = match &self.source_root {
-            Some(_) => (build_system_prompt_with_tools(policy_text, self.focus), true),
-            None => (build_system_prompt(policy_text, self.focus), false),
-        };
+        let system_prompt = build_system_prompt(policy_text, self.focus);
         let user_prompt = build_user_prompt(contexts);
 
-        // Build agent — conditionally register file-reading tools.
+        // Build the agent once per review.  Registering the tools on the
+        // builder causes their definitions to be sent to the LLM on each
+        // completion request; the dispatch loop below executes them locally.
+        let read_tool = ReadFileTool::new(self.source_root.clone());
+        let find_tool = FindSymbolTool::new(self.source_root.clone());
         let mut builder = rig::agent::AgentBuilder::new(self.model.clone())
-            .preamble(&system_prompt);
+            .preamble(&system_prompt)
+            .tool(ReadFileTool::new(self.source_root.clone()))
+            .tool(FindSymbolTool::new(self.source_root.clone()));
         if let Some(ref params) = self.extra_params {
             builder = builder.additional_params(params.clone());
         }
-        if use_tools {
-            let sr = self.source_root.as_ref().unwrap().clone();
-            builder = builder
-                .tool(ReadFileTool::new(sr.clone()))
-                .tool(FindSymbolTool::new(sr));
-        }
         let agent = builder.build();
 
-        // history is kept empty for every call. build_correction_prompt embeds
-        // the original user prompt, the bad response, the parse error, and the
-        // schema inline, so each attempt is fully self-contained.
-        //
+        // History is kept empty across retry attempts.  build_correction_prompt
+        // embeds the original user prompt, the bad response, the parse error,
+        // and the schema inline, so each attempt is fully self-contained.
         // Passing accumulated history causes rig-core to serialize assistant
         // messages with `"tool_calls": []`, which DeepSeek (and other
         // OpenAI-compat providers) reject with a 400 invalid_request_error.
@@ -133,152 +127,23 @@ where
                 "LLM call start"
             );
 
-            // Hard per-call timeout per attempt.  Timeouts and transient 5xx
+            // Run one attempt's multi-turn tool-call loop.  Each individual LLM
+            // HTTP call gets its own hard timeout.  Timeouts and transient 5xx
             // errors are retried (up to max_retries); only non-retryable 4xx
             // errors (bad API key, wrong model ID) short-circuit immediately.
-            //
-            // When tools are registered, use `agent.prompt()` — Rig's Prompt
-            // trait handles the full multi-turn tool-call loop internally and
-            // returns the LLM's final text response after all tool calls have
-            // been executed.  When tools are absent, `agent.chat()` with an
-            // empty history is equivalent and avoids the `tool_calls: []`
-            // serialisation issue some OpenAI-compat providers reject.
             let call_start = Instant::now();
-            let raw = if use_tools {
-                // ── Multi-turn tool-call loop ─────────────────────────────────
-                // Each LLM HTTP call gets its own hard timeout.  We loop until
-                // the model returns a plain text response (no more tool calls).
-                const MAX_TOOL_TURNS: usize = 8;
-                let sr = self.source_root.as_ref().unwrap().clone();
-                let read_tool = ReadFileTool::new(sr.clone());
-                let find_tool = FindSymbolTool::new(sr);
-                let mut history: Vec<Message> = vec![];
-                let mut next_prompt = Message::user(&current_prompt);
-
-                let loop_result: Result<String, ReviewError> = 'turns: {
-                    for _turn in 0..MAX_TOOL_TURNS {
-                        let builder =
-                            match agent.completion(next_prompt.clone(), history.clone()).await {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    break 'turns Err(ReviewError::Completion(e.to_string()))
-                                }
-                            };
-                        let resp = match timeout(
-                            Duration::from_secs(self.timeout_secs),
-                            builder.send(),
-                        )
-                        .await
-                        {
-                            Err(_) => break 'turns Err(ReviewError::Completion(format!(
-                                "Timeout after {}s waiting for LLM response",
-                                self.timeout_secs
-                            ))),
-                            Ok(Err(e)) => {
-                                break 'turns Err(ReviewError::Completion(e.to_string()))
-                            }
-                            Ok(Ok(r)) => r,
-                        };
-
-                        match resp.choice.first() {
-                            AssistantContent::Text(text) => {
-                                break 'turns Ok(text.text.clone());
-                            }
-                            AssistantContent::ToolCall(tc) => {
-                                let tc = tc.clone();
-                                let args_str = tc.function.arguments.to_string();
-                                let output = match tc.function.name.as_str() {
-                                    "read_file" => {
-                                        match serde_json::from_str::<crate::tools::ReadFileArgs>(
-                                            &args_str,
-                                        ) {
-                                            Ok(a) => read_tool
-                                                .call(a)
-                                                .await
-                                                .unwrap_or_else(|e| format!("Tool error: {e}")),
-                                            Err(e) => format!("Args parse error: {e}"),
-                                        }
-                                    }
-                                    "find_symbol" => {
-                                        match serde_json::from_str::<
-                                            crate::tools::FindSymbolArgs,
-                                        >(&args_str)
-                                        {
-                                            Ok(a) => find_tool
-                                                .call(a)
-                                                .await
-                                                .unwrap_or_else(|e| format!("Tool error: {e}")),
-                                            Err(e) => format!("Args parse error: {e}"),
-                                        }
-                                    }
-                                    name => format!("Unknown tool: {name}"),
-                                };
-
-                                // Append current prompt + assistant tool-call to history.
-                                history.push(next_prompt.clone());
-                                history.push(Message::Assistant {
-                                    content: OneOrMany::one(AssistantContent::ToolCall(
-                                        tc.clone(),
-                                    )),
-                                });
-
-                                // The tool result becomes the next user message.
-                                next_prompt = Message::User {
-                                    content: OneOrMany::one(UserContent::tool_result(
-                                        &tc.id,
-                                        OneOrMany::one(ToolResultContent::text(output)),
-                                    )),
-                                };
-                            }
-                        }
-                    }
-                    Err(ReviewError::Completion(
-                        "Tool call loop exceeded max turns (8)".into(),
-                    ))
-                };
-
-                match loop_result {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(attempt, label = %self.label, error = %e, "Tool call loop failed");
-                        if is_retryable_review_error(&e) {
-                            last_error = e.to_string();
-                            continue;
-                        }
-                        return Err(e);
-                    }
-                }
-            } else {
-                let result = timeout(
-                    Duration::from_secs(self.timeout_secs),
-                    agent.chat(current_prompt.clone(), vec![]),
-                )
-                .await;
-                match result {
-                    Err(_) => {
-                        // Timeout is always retryable — transient network jitter
-                        // or provider overload. Continue to the next attempt.
-                        let msg = format!(
-                            "Timeout after {}s waiting for LLM response",
-                            self.timeout_secs
-                        );
-                        warn!(attempt, label = %self.label, timeout_secs = self.timeout_secs, "LLM call timed out — will retry");
-                        last_error = msg;
+            let raw = match self
+                .run_tool_loop(&agent, &read_tool, &find_tool, &current_prompt)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(attempt, label = %self.label, error = %e, "Tool call loop failed");
+                    if is_retryable_review_error(&e) {
+                        last_error = e.to_string();
                         continue;
                     }
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        if !is_retryable_api_error(&msg) {
-                            // Auth failures and malformed-request errors (4xx) will
-                            // not improve on retry — fail fast.
-                            warn!(attempt, label = %self.label, error = %msg, "Non-retryable API error");
-                            return Err(ReviewError::Completion(msg));
-                        }
-                        warn!(attempt, label = %self.label, error = %msg, "Retryable API error — will retry");
-                        last_error = msg;
-                        continue;
-                    }
-                    Ok(Ok(s)) => s,
+                    return Err(e);
                 }
             };
             let elapsed_ms = call_start.elapsed().as_millis();
@@ -339,6 +204,94 @@ where
             parse_error: last_error,
             raw: last_raw,
         })
+    }
+
+    /// Run one attempt's multi-turn tool-call loop: send the user prompt,
+    /// execute any tool calls the model issues, feed the results back, and
+    /// repeat until the model returns a plain-text response or the turn cap
+    /// is hit.  Each individual LLM HTTP call is subject to `self.timeout_secs`.
+    async fn run_tool_loop(
+        &self,
+        agent: &rig::agent::Agent<M>,
+        read_tool: &ReadFileTool,
+        find_tool: &FindSymbolTool,
+        user_prompt: &str,
+    ) -> Result<String, ReviewError> {
+        const MAX_TOOL_TURNS: usize = 8;
+
+        let mut history: Vec<Message> = vec![];
+        let mut next_prompt = Message::user(user_prompt);
+
+        for _turn in 0..MAX_TOOL_TURNS {
+            let builder = agent
+                .completion(next_prompt.clone(), history.clone())
+                .await
+                .map_err(|e| ReviewError::Completion(e.to_string()))?;
+
+            let resp = match timeout(Duration::from_secs(self.timeout_secs), builder.send()).await {
+                Err(_) => {
+                    return Err(ReviewError::Completion(format!(
+                        "Timeout after {}s waiting for LLM response",
+                        self.timeout_secs
+                    )));
+                }
+                Ok(Err(e)) => return Err(ReviewError::Completion(e.to_string())),
+                Ok(Ok(r)) => r,
+            };
+
+            match resp.choice.first() {
+                AssistantContent::Text(text) => return Ok(text.text.clone()),
+                AssistantContent::ToolCall(tc) => {
+                    let tc = tc.clone();
+                    let output = dispatch_tool(&tc, read_tool, find_tool).await;
+
+                    // Append current prompt + assistant tool-call to history.
+                    history.push(next_prompt.clone());
+                    history.push(Message::Assistant {
+                        content: OneOrMany::one(AssistantContent::ToolCall(tc.clone())),
+                    });
+
+                    // The tool result becomes the next user message.
+                    next_prompt = Message::User {
+                        content: OneOrMany::one(UserContent::tool_result(
+                            &tc.id,
+                            OneOrMany::one(ToolResultContent::text(output)),
+                        )),
+                    };
+                }
+            }
+        }
+        Err(ReviewError::Completion(format!(
+            "Tool call loop exceeded max turns ({MAX_TOOL_TURNS})"
+        )))
+    }
+}
+
+/// Execute a single tool call issued by the model and return its textual
+/// output.  Unknown tool names and argument-parse failures return descriptive
+/// strings that are fed back into the conversation so the model can recover.
+async fn dispatch_tool(
+    tc: &rig::completion::message::ToolCall,
+    read_tool: &ReadFileTool,
+    find_tool: &FindSymbolTool,
+) -> String {
+    let args_str = tc.function.arguments.to_string();
+    match tc.function.name.as_str() {
+        "read_file" => match serde_json::from_str::<crate::tools::ReadFileArgs>(&args_str) {
+            Ok(a) => read_tool
+                .call(a)
+                .await
+                .unwrap_or_else(|e| format!("Tool error: {e}")),
+            Err(e) => format!("Args parse error: {e}"),
+        },
+        "find_symbol" => match serde_json::from_str::<crate::tools::FindSymbolArgs>(&args_str) {
+            Ok(a) => find_tool
+                .call(a)
+                .await
+                .unwrap_or_else(|e| format!("Tool error: {e}")),
+            Err(e) => format!("Args parse error: {e}"),
+        },
+        name => format!("Unknown tool: {name}"),
     }
 }
 

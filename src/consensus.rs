@@ -166,6 +166,34 @@ fn severity_rank(s: &Severity) -> u8 {
 
 // ── Error → synthetic ReviewResult ───────────────────────────────────────────
 
+fn unwrap_or_fail(res: Result<ReviewResult, ReviewError>, label: &str) -> ReviewResult {
+    match res {
+        Ok(r) => r,
+        Err(e) => {
+            let description = format!("Reviewer error: {e}");
+            ReviewResult {
+                model_id: label.to_owned(),
+                verdict: Verdict::Fail,
+                confidence: 1.0,
+                findings: vec![Finding {
+                    severity: Severity::Critical,
+                    location: CodeLocation {
+                        file: "<reviewer-error>".into(),
+                        line_start: 0,
+                        line_end: 0,
+                    },
+                    rule_id: "INTERNAL-001".into(),
+                    description,
+                    suggestion: "Check reviewer logs and API key configuration.".into(),
+                }],
+                reasoning: format!("Reviewer failed to produce a valid result: {e}"),
+            }
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,31 +325,5 @@ mod tests {
         let r = evaluate(pairs);
         let reason = gate_failure_reason(&r);
         assert!(reason.to_uppercase().contains("SECURITY"));
-    }
-}
-
-fn unwrap_or_fail(res: Result<ReviewResult, ReviewError>, label: &str) -> ReviewResult {
-    match res {
-        Ok(r) => r,
-        Err(e) => {
-            let description = format!("Reviewer error: {e}");
-            ReviewResult {
-                model_id: label.to_owned(),
-                verdict: Verdict::Fail,
-                confidence: 1.0,
-                findings: vec![Finding {
-                    severity: Severity::Critical,
-                    location: CodeLocation {
-                        file: "<reviewer-error>".into(),
-                        line_start: 0,
-                        line_end: 0,
-                    },
-                    rule_id: "INTERNAL-001".into(),
-                    description,
-                    suggestion: "Check reviewer logs and API key configuration.".into(),
-                }],
-                reasoning: format!("Reviewer failed to produce a valid result: {e}"),
-            }
-        }
     }
 }

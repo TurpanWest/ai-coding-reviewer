@@ -196,7 +196,7 @@ impl Metrics {
 
 /// Record per-reviewer metrics after a review call completes.
 ///
-/// `focus` is `"style"` or `"logic"`.
+/// `focus` is one of `"security"`, `"correctness"`, `"performance"`, `"maintainability"`.
 pub fn record_review(
     metrics: &Metrics,
     label: &str,

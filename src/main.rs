@@ -24,13 +24,51 @@ use crate::telemetry::{record_review, Metrics};
 
 // ── Provider selection ─────────────────────────────────────────────────────────
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Copy, Debug)]
 enum ProviderKind {
     Minimax,
     Deepseek,
     Anthropic,
     Gemini,
     Openai,
+}
+
+impl ProviderKind {
+    /// Human-readable label used in reports and telemetry.
+    fn label(self) -> &'static str {
+        match self {
+            ProviderKind::Minimax   => "MiniMax",
+            ProviderKind::Deepseek  => "DeepSeek",
+            ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::Gemini    => "Gemini",
+            ProviderKind::Openai    => "OpenAI",
+        }
+    }
+
+    /// Default base URL for providers that take one.  `None` means the provider
+    /// has no configurable endpoint (i.e. Gemini, which routes through its SDK).
+    fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::Minimax   => Some("https://api.minimax.chat/v1"),
+            // DeepSeek's API is fully OpenAI-compatible.  Routing through
+            // openai::Client (rather than rig's deepseek::Client) preserves the
+            // `usage` field — the native DeepSeek provider drops it.
+            ProviderKind::Deepseek  => Some("https://api.deepseek.com/v1"),
+            ProviderKind::Anthropic => Some("https://api.anthropic.com"),
+            ProviderKind::Openai    => None,
+            ProviderKind::Gemini    => None,
+        }
+    }
+
+    fn default_model(self) -> &'static str {
+        match self {
+            ProviderKind::Minimax   => "MiniMax-M2.7",
+            ProviderKind::Deepseek  => "deepseek-chat",
+            ProviderKind::Anthropic => "claude-sonnet-4-6",
+            ProviderKind::Gemini    => "gemini-3.1-pro-preview",
+            ProviderKind::Openai    => "gpt-5.4",
+        }
+    }
 }
 
 // ── CLI definition ─────────────────────────────────────────────────────────────
@@ -180,8 +218,7 @@ async fn run() -> Result<bool> {
     // ── Extract AST contexts ───────────────────────────────────────────────
     let mut ast_contexts = Vec::new();
     for fd in &changed_files {
-        let file_raw_diff = extract_file_diff_chunk(&diff_text, fd);
-        let ctx = ast::extract_context(fd, &cli.source_root, &file_raw_diff)?;
+        let ctx = ast::extract_context(fd, &cli.source_root, &fd.raw_chunk)?;
         info!(
             file = %ctx.file,
             changed_symbols = ctx.changed_symbols.len(),
@@ -226,15 +263,29 @@ async fn run() -> Result<bool> {
         .map(|(i, group_ctx)| -> Result<_> {
             let focus = FOCUSES[i];
             let ra = build_reviewer(
-                cli.reviewer_1.clone(), key_a.clone(), base_url_a.clone(),
-                cli.reviewer_1_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
-                Some(cli.source_root.clone()),
+                ReviewerCfg {
+                    kind: cli.reviewer_1,
+                    api_key: key_a.clone(),
+                    base_url: base_url_a.clone(),
+                    model_id: cli.reviewer_1_model.clone(),
+                    max_retries: cli.max_retries,
+                    reviewer_timeout: cli.reviewer_timeout,
+                    source_root: cli.source_root.clone(),
+                },
+                focus,
             )
             .with_context(|| format!("Failed to build reviewer A for group {i}"))?;
             let rb = build_reviewer(
-                cli.reviewer_2.clone(), key_b.clone(), base_url_b.clone(),
-                cli.reviewer_2_model.clone(), cli.max_retries, focus, cli.reviewer_timeout,
-                Some(cli.source_root.clone()),
+                ReviewerCfg {
+                    kind: cli.reviewer_2,
+                    api_key: key_b.clone(),
+                    base_url: base_url_b.clone(),
+                    model_id: cli.reviewer_2_model.clone(),
+                    max_retries: cli.max_retries,
+                    reviewer_timeout: cli.reviewer_timeout,
+                    source_root: cli.source_root.clone(),
+                },
+                focus,
             )
             .with_context(|| format!("Failed to build reviewer B for group {i}"))?;
             let label_a = ra.label().to_owned();
@@ -307,64 +358,80 @@ async fn run() -> Result<bool> {
 
 // ── Provider builder ───────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn build_reviewer(
+/// Per-reviewer configuration gathered from CLI flags / env vars.
+struct ReviewerCfg {
     kind: ProviderKind,
     api_key: String,
     base_url: Option<String>,
     model_id: Option<String>,
     max_retries: u32,
-    focus: ReviewFocus,
     reviewer_timeout: u64,
-    source_root: Option<PathBuf>,
-) -> Result<Box<dyn Reviewer>> {
-    match kind {
-        ProviderKind::Minimax => {
-            let url = base_url.unwrap_or_else(|| "https://api.minimax.chat/v1".into());
-            let mid = model_id.unwrap_or_else(|| "MiniMax-M2.7".into());
-            let client = openai::Client::from_url(&api_key, &url);
-            let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "MiniMax", max_retries, focus, reviewer_timeout, None, source_root)))
+    source_root: PathBuf,
+}
+
+fn build_reviewer(cfg: ReviewerCfg, focus: ReviewFocus) -> Result<Box<dyn Reviewer>> {
+    let label = cfg.kind.label();
+    let mid = cfg.model_id.unwrap_or_else(|| cfg.kind.default_model().into());
+    let base = cfg
+        .base_url
+        .or_else(|| cfg.kind.default_base_url().map(str::to_owned));
+
+    // Anthropic benefits from provider-side prefix caching of the stable system
+    // prompt (policy + schema).  All OpenAI-compat providers handle caching
+    // transparently, so no extra_params is needed there.
+    let extra_params = match cfg.kind {
+        ProviderKind::Anthropic => {
+            Some(serde_json::json!({"cache_control": {"type": "ephemeral"}}))
         }
-        ProviderKind::Deepseek => {
-            // DeepSeek's API is fully OpenAI-compatible.  Using openai::Client
-            // instead of deepseek::Client routes through rig's OpenAI code path,
-            // which correctly extracts and logs token usage from the response.
-            // rig's own deepseek provider omits the `usage` field from its
-            // CompletionResponse struct, so token counts are silently discarded.
-            let url = base_url.unwrap_or_else(|| "https://api.deepseek.com/v1".into());
-            let mid = model_id.unwrap_or_else(|| "deepseek-chat".into());
-            let client = openai::Client::from_url(&api_key, &url);
-            let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "DeepSeek", max_retries, focus, reviewer_timeout, None, source_root)))
+        _ => None,
+    };
+
+    // Each arm builds a different concrete CompletionModel type, so we have to
+    // materialise the boxed reviewer inline rather than funnelling through a
+    // generic helper.
+    let reviewer: Box<dyn Reviewer> = match cfg.kind {
+        ProviderKind::Minimax | ProviderKind::Deepseek | ProviderKind::Openai => {
+            let client = match base {
+                Some(url) => openai::Client::from_url(&cfg.api_key, &url),
+                None => openai::Client::new(&cfg.api_key),
+            };
+            Box::new(LlmReviewer::new(
+                client.completion_model(&mid),
+                label,
+                cfg.max_retries,
+                focus,
+                cfg.reviewer_timeout,
+                extra_params,
+                cfg.source_root,
+            ))
         }
         ProviderKind::Anthropic => {
-            let mid = model_id.unwrap_or_else(|| "claude-sonnet-4-6".into());
-            let base = base_url.unwrap_or_else(|| "https://api.anthropic.com".into());
-            let client = anthropic::Client::new(&api_key, &base, None, "2023-06-01");
-            let model = client.completion_model(&mid);
-            // Enable automatic prompt caching: the stable system prompt (policy + schema)
-            // is cached at the provider side, slashing cost and latency on repeated CI runs.
-            let cache = serde_json::json!({"cache_control": {"type": "ephemeral"}});
-            Ok(Box::new(LlmReviewer::new(model, "Anthropic", max_retries, focus, reviewer_timeout, Some(cache), source_root)))
+            let base = base.unwrap_or_else(|| "https://api.anthropic.com".into());
+            let client = anthropic::Client::new(&cfg.api_key, &base, None, "2023-06-01");
+            Box::new(LlmReviewer::new(
+                client.completion_model(&mid),
+                label,
+                cfg.max_retries,
+                focus,
+                cfg.reviewer_timeout,
+                extra_params,
+                cfg.source_root,
+            ))
         }
         ProviderKind::Gemini => {
-            let mid = model_id.unwrap_or_else(|| "gemini-3.1-pro-preview".into());
-            let client = gemini::Client::new(&api_key);
-            let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "Gemini", max_retries, focus, reviewer_timeout, None, source_root)))
+            let client = gemini::Client::new(&cfg.api_key);
+            Box::new(LlmReviewer::new(
+                client.completion_model(&mid),
+                label,
+                cfg.max_retries,
+                focus,
+                cfg.reviewer_timeout,
+                extra_params,
+                cfg.source_root,
+            ))
         }
-        ProviderKind::Openai => {
-            let mid = model_id.unwrap_or_else(|| "gpt-5.4".into());
-            let client = if let Some(url) = base_url {
-                openai::Client::from_url(&api_key, &url)
-            } else {
-                openai::Client::new(&api_key)
-            };
-            let model = client.completion_model(&mid);
-            Ok(Box::new(LlmReviewer::new(model, "OpenAI", max_retries, focus, reviewer_timeout, None, source_root)))
-        }
-    }
+    };
+    Ok(reviewer)
 }
 
 // ── CLI validators ─────────────────────────────────────────────────────────────
@@ -402,38 +469,5 @@ fn read_diff(path: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(path)
             .with_context(|| format!("Cannot read diff file: {path}"))
-    }
-}
-
-/// Extract the portion of the unified diff that belongs to a specific file.
-fn extract_file_diff_chunk(full_diff: &str, fd: &diff::FileDiff) -> String {
-    let target = match fd.source_path() {
-        Some(p) => p.display().to_string(),
-        None => return String::new(),
-    };
-
-    let lines = full_diff.lines();
-    let mut chunk = String::new();
-    let mut capturing = false;
-
-    for line in lines {
-        if line.starts_with("diff --git ") {
-            if capturing {
-                break;
-            }
-            if line.contains(&target) {
-                capturing = true;
-            }
-        }
-        if capturing {
-            chunk.push_str(line);
-            chunk.push('\n');
-        }
-    }
-
-    if chunk.is_empty() {
-        full_diff.to_owned()
-    } else {
-        chunk
     }
 }

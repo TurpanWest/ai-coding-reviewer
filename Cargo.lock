@@ -19,7 +19,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "diffy",
  "futures",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -351,15 +350,6 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
-name = "diffy"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b545b8c50194bdd008283985ab0b31dba153cfd5b3066a92770634fbc0d7d291"
-dependencies = [
- "nu-ansi-term",
-]
 
 [[package]]
 name = "displaydoc"

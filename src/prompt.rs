@@ -17,13 +17,12 @@ fn extract_ignore_annotations(contexts: &[FileAstContext]) -> Vec<IgnoreAnnotati
     for ctx in contexts {
         for line in ctx.raw_diff.lines() {
             // Only inspect lines that exist in the new file (added or context).
-            let content = if line.starts_with('+') && !line.starts_with("+++") {
-                &line[1..]
-            } else if line.starts_with(' ') {
-                &line[1..]
-            } else {
+            let is_added = line.starts_with('+') && !line.starts_with("+++");
+            let is_context = line.starts_with(' ');
+            if !(is_added || is_context) {
                 continue;
-            };
+            }
+            let content = &line[1..];
             if let Some(ann) = parse_ignore_comment(content, &ctx.file) {
                 result.push(ann);
             }
@@ -88,9 +87,11 @@ impl ReviewFocus {
 // ── System prompt (cached portion) ───────────────────────────────────────────
 
 /// Build the **system prompt** that will be submitted with `cache_control:
-/// ephemeral` (MiniMax/Anthropic) or as the stable prefix (DeepSeek).
+/// ephemeral` (Anthropic) or as the stable prefix (OpenAI-compat providers).
 ///
-/// This is the large, stable part that gets cached between requests.
+/// This is the large, stable part that gets cached between requests.  It also
+/// tells the model about the `read_file` / `find_symbol` tools it can call for
+/// additional context (the reviewer always registers them).
 /// `policy_text` is the raw Markdown content of the security/coding policy file.
 pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
     let focus_section = match focus {
@@ -181,32 +182,21 @@ Field semantics:
 2. Do NOT truncate the JSON — emit the complete object.
 3. If you find NO issues, still produce the JSON with `findings: []` and an honest confidence score.
 4. `line_start` and `line_end` must refer to line numbers in the NEW version of the file.
+
+## Tool Usage
+You have access to tools to read additional source code from the repository.
+Use `read_file` or `find_symbol` when:
+- The diff calls a function whose full definition is NOT shown in the context above
+- You need to verify a callee's implementation to judge correctness or security
+- You need to see how a changed interface is used elsewhere in the codebase
+
+Call tools as needed before producing your verdict. When you have sufficient context,
+output the final JSON review result as your last message.
+Do NOT call tools to re-read content already visible in the diff or symbol context above.
 "#,
         focus_section = focus_section,
         policy_text = policy_text,
         REVIEW_JSON_SCHEMA = REVIEW_JSON_SCHEMA,
-    )
-}
-
-// ── Tool-aware system prompt ──────────────────────────────────────────────────
-
-/// Variant of [`build_system_prompt`] that appends tool-usage instructions.
-///
-/// Used when the reviewer has `read_file` / `find_symbol` tools available so
-/// the LLM knows it can request additional context before giving its verdict.
-pub fn build_system_prompt_with_tools(policy_text: &str, focus: ReviewFocus) -> String {
-    let base = build_system_prompt(policy_text, focus);
-    format!(
-        "{base}\n\n\
-## Tool Usage\n\
-You have access to tools to read additional source code from the repository.\n\
-Use `read_file` or `find_symbol` when:\n\
-- The diff calls a function whose full definition is NOT shown in the context above\n\
-- You need to verify a callee's implementation to judge correctness or security\n\
-- You need to see how a changed interface is used elsewhere in the codebase\n\n\
-Call tools as needed before producing your verdict. When you have sufficient context,\n\
-output the final JSON review result as your last message.\n\
-Do NOT call tools to re-read content already visible in the diff or symbol context above.\n"
     )
 }
 

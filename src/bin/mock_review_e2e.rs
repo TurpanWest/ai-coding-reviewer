@@ -6,10 +6,9 @@
 //! without needing real API keys.
 //!
 //! Call sequence per model:
-//!   1. First POST to /v1/chat/completions  →  mock returns `finish_reason: "tool_calls"`
-//!                                              asking for `read_file("src/prompt.rs")`
-//!   2. Second POST (body contains `"role":"tool"`)
-//!                                          →  mock returns final JSON review result
+//!   1. First POST to /v1/chat/completions → mock returns `finish_reason: "tool_calls"`
+//!      asking for `read_file("src/prompt.rs")`
+//!   2. Second POST (body contains `"role":"tool"`) → mock returns final JSON review result
 //!
 //! Usage:  cargo run --bin mock_review_e2e
 
@@ -88,22 +87,20 @@ async fn serve_one_connection(
         raw.extend_from_slice(&buf[..n]);
 
         // Find end of headers.
-        if header_end == 0 {
-            if let Some(pos) = find_header_end(&raw) {
-                header_end = pos;
-                // Parse Content-Length from headers.
-                let headers = String::from_utf8_lossy(&raw[..header_end]);
-                for line in headers.lines() {
-                    if line.to_lowercase().starts_with("content-length:") {
-                        content_length = line
-                            .split(':')
-                            .nth(1)
-                            .unwrap_or("0")
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        break;
-                    }
+        if header_end == 0 && let Some(pos) = find_header_end(&raw) {
+            header_end = pos;
+            // Parse Content-Length from headers.
+            let headers = String::from_utf8_lossy(&raw[..header_end]);
+            for line in headers.lines() {
+                if line.to_lowercase().starts_with("content-length:") {
+                    content_length = line
+                        .split(':')
+                        .nth(1)
+                        .unwrap_or("0")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                    break;
                 }
             }
         }
