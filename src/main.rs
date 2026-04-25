@@ -2,6 +2,7 @@ mod ast;
 mod consensus;
 mod diff;
 mod models;
+mod policy;
 mod prompt;
 mod report;
 mod telemetry;
@@ -204,6 +205,22 @@ async fn run() -> Result<bool> {
         "Inputs loaded"
     );
 
+    // ── Extract canonical rule-ID list from policy ──────────────────────────
+    // Findings whose rule_id isn't in this set are dropped post-review (see
+    // consensus::drop_unknown_rules). An empty set means the policy declares
+    // no rule IDs in `**XYZ-NNN**` form — we refuse to run, since the filter
+    // would then silently discard every model finding.
+    let allowed_rules = policy::extract_rule_ids(&policy_text);
+    if allowed_rules.is_empty() {
+        anyhow::bail!(
+            "Policy file {} declares no rule IDs in `**XYZ-NNN**` form. \
+             Without a rule list, fabricated findings cannot be filtered.\n\
+             Add at least one `- **RULE-001**: …` entry to the policy.",
+            cli.policy.display()
+        );
+    }
+    info!(rules = allowed_rules.len(), "Policy rule IDs extracted");
+
     // ── Guard: diff size limit ──────────────────────────────────────────────
     let diff_lines = diff_text.lines().count();
     metrics.diff_lines.set(diff_lines as i64);
@@ -333,7 +350,9 @@ async fn run() -> Result<bool> {
     for (i, dur, r_a, r_b, label_a, label_b, focus, file_names) in raw_outputs {
         record_review(&metrics, &label_a, focus.as_str(), dur, &r_a);
         record_review(&metrics, &label_b, focus.as_str(), dur, &r_b);
-        let pair = consensus::evaluate_pair(r_a, r_b, label_a, label_b, focus, i, file_names);
+        let pair = consensus::evaluate_pair(
+            r_a, r_b, label_a, label_b, focus, i, file_names, &allowed_rules,
+        );
         pair_results.push(pair);
     }
 
