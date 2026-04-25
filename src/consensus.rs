@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::models::{
     CodeLocation, ConsensusResult, Finding, PairResult, ReviewError, ReviewFocus, ReviewResult,
     Severity, Verdict,
 };
+use crate::policy::filter_findings;
 
 // ── Gate threshold ────────────────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ pub const CONFIDENCE_THRESHOLD: f64 = 0.90;
 /// The pair passes only when:
 /// 1. Both models' confidence >= `CONFIDENCE_THRESHOLD`
 /// 2. Both models agree on a `Pass` verdict
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_pair(
     res_a: Result<ReviewResult, ReviewError>,
     res_b: Result<ReviewResult, ReviewError>,
@@ -24,9 +26,13 @@ pub fn evaluate_pair(
     focus: ReviewFocus,
     group_index: usize,
     files: Vec<String>,
+    allowed_rules: &HashSet<String>,
 ) -> PairResult {
-    let result_a = unwrap_or_fail(res_a, &label_a);
-    let result_b = unwrap_or_fail(res_b, &label_b);
+    let mut result_a = unwrap_or_fail(res_a, &label_a);
+    let mut result_b = unwrap_or_fail(res_b, &label_b);
+
+    drop_unknown_rules(&mut result_a, &label_a, focus, allowed_rules);
+    drop_unknown_rules(&mut result_b, &label_b, focus, allowed_rules);
 
     let both_confident = result_a.confidence >= CONFIDENCE_THRESHOLD
         && result_b.confidence >= CONFIDENCE_THRESHOLD;
@@ -192,6 +198,30 @@ fn unwrap_or_fail(res: Result<ReviewResult, ReviewError>, label: &str) -> Review
     }
 }
 
+// ── Rule-ID post-validation ──────────────────────────────────────────────────
+
+/// Drop findings whose `rule_id` is not declared in the policy.  Models
+/// occasionally invent rule IDs; we surface those as a warning and discard
+/// them rather than letting them reach the report.
+fn drop_unknown_rules(
+    result: &mut ReviewResult,
+    label: &str,
+    focus: ReviewFocus,
+    allowed: &HashSet<String>,
+) {
+    let dropped = filter_findings(&mut result.findings, allowed);
+    if !dropped.is_empty() {
+        let ids: Vec<&str> = dropped.iter().map(|f| f.rule_id.as_str()).collect();
+        tracing::warn!(
+            reviewer = label,
+            focus = focus.as_str(),
+            count = dropped.len(),
+            unknown_rule_ids = ?ids,
+            "Dropped findings with rule_ids not in policy"
+        );
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -226,8 +256,21 @@ mod tests {
         }
     }
 
+    fn allowed_rules() -> HashSet<String> {
+        ["R1", "R2"].into_iter().map(String::from).collect()
+    }
+
     fn pair(ra: Result<ReviewResult, ReviewError>, rb: Result<ReviewResult, ReviewError>) -> PairResult {
-        evaluate_pair(ra, rb, "A".into(), "B".into(), ReviewFocus::Security, 0, vec![])
+        evaluate_pair(
+            ra,
+            rb,
+            "A".into(),
+            "B".into(),
+            ReviewFocus::Security,
+            0,
+            vec![],
+            &allowed_rules(),
+        )
     }
 
     // ── evaluate_pair ─────────────────────────────────────────────────────────
@@ -311,6 +354,40 @@ mod tests {
     }
 
     // ── gate_failure_reason ───────────────────────────────────────────────────
+
+    // ── rule_id post-validation ───────────────────────────────────────────────
+
+    #[test]
+    fn test_evaluate_pair_drops_fabricated_rule_ids() {
+        let mut result = pass(0.95);
+        result.findings = vec![
+            finding("f.rs", 1, "R1", Severity::Low),
+            finding("f.rs", 2, "FAKE-999", Severity::High),
+        ];
+        let p = pair(Ok(result), Ok(pass(0.95)));
+        // The fabricated rule_id is gone from both the per-reviewer findings
+        // and the merged pair result.
+        let kept_rules: Vec<&str> =
+            p.result_a.findings.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(kept_rules, vec!["R1"]);
+        let merged_rules: Vec<&str> =
+            p.merged_findings.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(merged_rules, vec!["R1"]);
+    }
+
+    #[test]
+    fn test_evaluate_pair_keeps_internal_rule_id_from_reviewer_error() {
+        // unwrap_or_fail synthesises an INTERNAL-001 finding; the filter
+        // must let it through even when the policy never declares it.
+        let p = pair(Ok(pass(0.95)), Err(ReviewError::Completion("boom".into())));
+        let internal: Vec<&str> = p
+            .result_b
+            .findings
+            .iter()
+            .map(|f| f.rule_id.as_str())
+            .collect();
+        assert_eq!(internal, vec!["INTERNAL-001"]);
+    }
 
     #[test]
     fn test_gate_failure_reason_passed_returns_simple_string() {
