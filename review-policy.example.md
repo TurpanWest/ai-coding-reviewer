@@ -2,6 +2,14 @@
 #
 # Copy this file to .github/review-policy.md and edit to match your project.
 # Models must cite rule IDs in findings (e.g. SEC-001).
+#
+# ── PR size note ─────────────────────────────────────────────────────────────
+# This file is injected into every LLM call alongside the diff and AST context.
+# Keep PRs small so the models have enough attention budget for the rules below:
+#   • Sweet spot:  ≤ 10 files, ≤ ~500 lines of net diff
+#   • Acceptable:  ≤ 30 files, ≤ ~1500 lines
+#   • Split when larger — one logical change per PR (see README "Recommended PR size")
+# This is human guidance for PR authors, not a rule the reviewer enforces.
 
 ## Security
 

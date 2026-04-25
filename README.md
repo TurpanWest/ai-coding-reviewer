@@ -133,6 +133,25 @@ PR diff
 
 ---
 
+## Recommended PR size
+
+Every one of the 8 concurrent LLM calls receives the full diff plus AST context for all changed files — per-call prompt size grows roughly linearly with the PR. Review quality degrades in long contexts (typically around 32k+ tokens) well before any hard window limit, so keeping PRs small is the cheapest way to keep reviews sharp.
+
+| Tier | Files | Net diff | Expectation |
+|---|---|---|---|
+| Sweet spot | ≤ 10 | ≤ ~500 lines | Fast, low-noise reviews |
+| Acceptable ceiling | ≤ 30 | ≤ ~1500 lines | Works, but slower and noisier |
+| Split required | > 30 or > 1500 lines | | Partition before review |
+
+**How to split**: prefer atomic commits organized by module or feature, then open one PR per logical unit. "One change, one PR" is the goal — not "one commit, one PR".
+
+**Natural exceptions** — these are legitimately large and should be routed through a dedicated review process rather than this gate:
+- Mass renames / signature changes that ripple across the codebase
+- Dependency upgrades and their mechanical call-site adaptations
+- Generated code: lock files, protobuf stubs, OpenAPI clients, migrations
+
+---
+
 ## Local usage
 
 ```bash
@@ -218,6 +237,20 @@ retry_policy: >
   Retryable: timeout, 5xx, 429, network reset — exponential backoff 1s→2s→4s→8s→16s.
   Non-retryable: 401, 403, 404, invalid API key — fail immediately.
   JSON parse failure also retries with a self-correction prompt (self-contained, no history accumulation).
+
+pr_size_guidance:
+  rationale: >
+    All 8 concurrent LLM calls receive the full diff plus AST context for every changed file.
+    Per-call prompt size grows roughly linearly with the PR; review quality degrades in long
+    contexts (≈ 32k+ tokens) well before the model's hard window limit.
+  sweet_spot:        "<= 10 files, <= ~500 lines net diff"
+  acceptable_ceiling: "<= 30 files, <= ~1500 lines net diff"
+  split_required:    "> 30 files OR > 1500 lines — partition before review"
+  split_strategy:    "atomic commits per module/feature; one logical change per PR"
+  natural_exceptions: >
+    Mass renames, signature ripples, dependency upgrades, and generated code (lock files,
+    protobuf stubs, OpenAPI clients, DB migrations) are legitimately large — route through
+    a dedicated review process rather than this gate.
 ```
 
 ---
