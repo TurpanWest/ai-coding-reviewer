@@ -382,12 +382,29 @@ struct ReviewerCfg {
     source_root: PathBuf,
 }
 
+/// Workaround for rig-core 0.9.1: every provider's `post()` helper does
+/// `format!("{base}/{path}").replace("//", "/")`, which silently corrupts
+/// `https://` into `https:/` and triggers a "relative URL without a base"
+/// error from reqwest. By pre-bloating the scheme to four slashes, the
+/// buggy `replace` collapses them back to two and the URL ends up correct.
+/// Remove once rig is upgraded past this bug.
+fn dodge_rig_url_bug(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("https:////{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("http:////{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
 fn build_reviewer(cfg: ReviewerCfg, focus: ReviewFocus) -> Result<Box<dyn Reviewer>> {
     let label = cfg.kind.label();
     let mid = cfg.model_id.unwrap_or_else(|| cfg.kind.default_model().into());
     let base = cfg
         .base_url
-        .or_else(|| cfg.kind.default_base_url().map(str::to_owned));
+        .or_else(|| cfg.kind.default_base_url().map(str::to_owned))
+        .map(|u| dodge_rig_url_bug(&u));
 
     // Anthropic benefits from provider-side prefix caching of the stable system
     // prompt (policy + schema).  All OpenAI-compat providers handle caching
@@ -419,7 +436,7 @@ fn build_reviewer(cfg: ReviewerCfg, focus: ReviewFocus) -> Result<Box<dyn Review
             ))
         }
         ProviderKind::Anthropic => {
-            let base = base.unwrap_or_else(|| "https://api.anthropic.com".into());
+            let base = base.unwrap_or_else(|| dodge_rig_url_bug("https://api.anthropic.com"));
             let client = anthropic::Client::new(&cfg.api_key, &base, None, "2023-06-01");
             Box::new(LlmReviewer::new(
                 client.completion_model(&mid),
