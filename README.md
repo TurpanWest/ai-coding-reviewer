@@ -23,28 +23,29 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute lowercase image ref
+      - name: Set image tag
         run: |
-          IMAGE=$(echo "ghcr.io/${{ github.repository }}:latest" | tr '[:upper:]' '[:lower:]')
+          IMAGE=$(echo "ai-reviewer-pr:${{ github.event.pull_request.head.sha || github.sha }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
 
-      - name: Pull reviewer image
-        run: |
-          docker pull "$IMAGE" || docker build -t "$IMAGE" .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build reviewer image from PR source
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Generate diff
         run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
