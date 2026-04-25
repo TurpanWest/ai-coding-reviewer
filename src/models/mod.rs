@@ -92,6 +92,8 @@ pub struct PairResult {
     pub result_b: ReviewResult,
     pub merged_findings: Vec<Finding>,
     pub pair_passed: bool,
+    /// Confidence threshold applied to this pair (focus-dependent).
+    pub confidence_threshold: f64,
 }
 
 /// Final output of the consensus engine combining all four focus groups.

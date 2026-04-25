@@ -6,17 +6,42 @@ use crate::models::{
 };
 use crate::policy::filter_findings;
 
-// ── Gate threshold ────────────────────────────────────────────────────────────
+// ── Gate thresholds ───────────────────────────────────────────────────────────
 
-pub const CONFIDENCE_THRESHOLD: f64 = 0.90;
+/// Strict threshold for security/correctness — RCE-class issues should be
+/// gated by high reviewer confidence.
+pub const STRICT_CONFIDENCE_THRESHOLD: f64 = 0.90;
+
+/// Lenient threshold for performance/maintainability — these are largely style
+/// judgements; treating them with the same bar as exploitable defects produces
+/// noise without protection.
+pub const LENIENT_CONFIDENCE_THRESHOLD: f64 = 0.80;
+
+/// Per-focus confidence threshold.
+pub fn confidence_threshold_for(focus: ReviewFocus) -> f64 {
+    match focus {
+        ReviewFocus::Security | ReviewFocus::Correctness => STRICT_CONFIDENCE_THRESHOLD,
+        ReviewFocus::Performance | ReviewFocus::Maintainability => LENIENT_CONFIDENCE_THRESHOLD,
+    }
+}
+
+/// A finding is "blocking" if its severity is MEDIUM or higher.  Below that,
+/// findings are informational and shouldn't drag the gate down on their own.
+fn is_blocking_severity(s: &Severity) -> bool {
+    matches!(s, Severity::Critical | Severity::High | Severity::Medium)
+}
 
 // ── Pair-level consensus ──────────────────────────────────────────────────────
 
 /// Evaluate a single reviewer pair and produce a `PairResult`.
 ///
-/// The pair passes only when:
-/// 1. Both models' confidence >= `CONFIDENCE_THRESHOLD`
-/// 2. Both models agree on a `Pass` verdict
+/// The pair passes only when both models return `Pass`.  Once that's true,
+/// the confidence threshold is applied as a *tiebreaker*: it must be cleared
+/// only when the pair is in a contested state — either there's a disagreement
+/// (one model voted `Fail`, handled above as auto-fail) or the merged findings
+/// include something at MEDIUM severity or higher.  When both models are
+/// confident PASS and report nothing meaningful, low confidence on its own
+/// will not block the gate — that path is essentially style judgement.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_pair(
     res_a: Result<ReviewResult, ReviewError>,
@@ -34,15 +59,18 @@ pub fn evaluate_pair(
     drop_unknown_rules(&mut result_a, &label_a, focus, allowed_rules);
     drop_unknown_rules(&mut result_b, &label_b, focus, allowed_rules);
 
-    let both_confident = result_a.confidence >= CONFIDENCE_THRESHOLD
-        && result_b.confidence >= CONFIDENCE_THRESHOLD;
+    let threshold = confidence_threshold_for(focus);
 
     let both_pass = matches!(result_a.verdict, Verdict::Pass)
         && matches!(result_b.verdict, Verdict::Pass);
 
-    let pair_passed = both_confident && both_pass;
-
     let merged_findings = merge_and_dedup(&result_a.findings, &result_b.findings);
+    let has_blocking_finding = merged_findings.iter().any(|f| is_blocking_severity(&f.severity));
+
+    let confidence_required = !both_pass || has_blocking_finding;
+    let both_confident = result_a.confidence >= threshold && result_b.confidence >= threshold;
+
+    let pair_passed = both_pass && (!confidence_required || both_confident);
 
     PairResult {
         focus: focus.as_str().to_owned(),
@@ -54,6 +82,7 @@ pub fn evaluate_pair(
         result_b,
         merged_findings,
         pair_passed,
+        confidence_threshold: threshold,
     }
 }
 
@@ -89,17 +118,26 @@ pub fn gate_failure_reason(result: &ConsensusResult) -> String {
             let lb = &group.label_b;
             let focus = group.focus.to_uppercase();
             let g = group.group_index + 1;
+            let threshold = group.confidence_threshold;
 
-            if a.confidence < CONFIDENCE_THRESHOLD {
+            let both_pass = matches!(a.verdict, Verdict::Pass)
+                && matches!(b.verdict, Verdict::Pass);
+            let has_blocking_finding = group
+                .merged_findings
+                .iter()
+                .any(|f| is_blocking_severity(&f.severity));
+            let confidence_required = !both_pass || has_blocking_finding;
+
+            if confidence_required && a.confidence < threshold {
                 reasons.push(format!(
                     "[G{g}/{focus}] {la} confidence too low ({:.2} < {:.2})",
-                    a.confidence, CONFIDENCE_THRESHOLD
+                    a.confidence, threshold
                 ));
             }
-            if b.confidence < CONFIDENCE_THRESHOLD {
+            if confidence_required && b.confidence < threshold {
                 reasons.push(format!(
                     "[G{g}/{focus}] {lb} confidence too low ({:.2} < {:.2})",
-                    b.confidence, CONFIDENCE_THRESHOLD
+                    b.confidence, threshold
                 ));
             }
             if a.verdict != b.verdict {
@@ -261,12 +299,20 @@ mod tests {
     }
 
     fn pair(ra: Result<ReviewResult, ReviewError>, rb: Result<ReviewResult, ReviewError>) -> PairResult {
+        pair_with_focus(ra, rb, ReviewFocus::Security)
+    }
+
+    fn pair_with_focus(
+        ra: Result<ReviewResult, ReviewError>,
+        rb: Result<ReviewResult, ReviewError>,
+        focus: ReviewFocus,
+    ) -> PairResult {
         evaluate_pair(
             ra,
             rb,
             "A".into(),
             "B".into(),
-            ReviewFocus::Security,
+            focus,
             0,
             vec![],
             &allowed_rules(),
@@ -286,13 +332,64 @@ mod tests {
     }
 
     #[test]
-    fn test_pair_low_confidence_blocks() {
-        assert!(!pair(Ok(pass(0.89)), Ok(pass(0.95))).pair_passed);
+    fn test_pair_low_confidence_passes_without_blocking_findings() {
+        // No findings of MEDIUM+ severity → confidence threshold doesn't apply.
+        assert!(pair(Ok(pass(0.70)), Ok(pass(0.65))).pair_passed);
     }
 
     #[test]
-    fn test_pair_confidence_exactly_at_threshold_passes() {
-        assert!(pair(Ok(pass(CONFIDENCE_THRESHOLD)), Ok(pass(CONFIDENCE_THRESHOLD))).pair_passed);
+    fn test_pair_low_confidence_blocks_with_blocking_finding() {
+        let mut a = pass(0.85);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::Medium)];
+        let p = pair(Ok(a), Ok(pass(0.85)));
+        assert!(!p.pair_passed);
+    }
+
+    #[test]
+    fn test_pair_low_confidence_passes_with_only_low_findings() {
+        // LOW / INFO are non-blocking — confidence threshold stays disengaged.
+        let mut a = pass(0.70);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::Low)];
+        let p = pair(Ok(a), Ok(pass(0.70)));
+        assert!(p.pair_passed);
+    }
+
+    #[test]
+    fn test_pair_confidence_exactly_at_strict_threshold_passes_with_blocking() {
+        let mut a = pass(STRICT_CONFIDENCE_THRESHOLD);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::High)];
+        let p = pair(Ok(a), Ok(pass(STRICT_CONFIDENCE_THRESHOLD)));
+        assert!(p.pair_passed);
+    }
+
+    #[test]
+    fn test_performance_focus_uses_lenient_threshold() {
+        // 0.82 would block under the strict 0.90 threshold, but performance
+        // findings only need to clear 0.80 — and only when there's a blocking
+        // finding to begin with.
+        let mut a = pass(0.82);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::High)];
+        let p = pair_with_focus(Ok(a), Ok(pass(0.82)), ReviewFocus::Performance);
+        assert!(p.pair_passed);
+        assert_eq!(p.confidence_threshold, LENIENT_CONFIDENCE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_performance_focus_blocks_below_lenient_threshold() {
+        let mut a = pass(0.75);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::Medium)];
+        let p = pair_with_focus(Ok(a), Ok(pass(0.85)), ReviewFocus::Performance);
+        assert!(!p.pair_passed);
+    }
+
+    #[test]
+    fn test_security_focus_keeps_strict_threshold() {
+        let mut a = pass(0.85);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::High)];
+        let p = pair_with_focus(Ok(a), Ok(pass(0.95)), ReviewFocus::Security);
+        // 0.85 < strict 0.90 with a HIGH finding → blocks.
+        assert!(!p.pair_passed);
+        assert_eq!(p.confidence_threshold, STRICT_CONFIDENCE_THRESHOLD);
     }
 
     #[test]

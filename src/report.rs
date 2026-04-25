@@ -1,6 +1,8 @@
 use chrono::Utc;
 
-use crate::consensus::{gate_failure_reason, CONFIDENCE_THRESHOLD};
+use crate::consensus::{
+    gate_failure_reason, LENIENT_CONFIDENCE_THRESHOLD, STRICT_CONFIDENCE_THRESHOLD,
+};
 use crate::models::{ConsensusResult, Finding, PairResult, ReviewResult, Severity, Verdict};
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -33,10 +35,27 @@ pub fn render_report(result: &ConsensusResult) -> String {
     md.push_str("|---|---|---|---|---|---|\n");
     for group in &result.groups {
         let g_label = format!("G{}", group.group_index + 1);
-        md.push_str(&confidence_row(&g_label, &group.label_a, &group.result_a, &group.focus));
-        md.push_str(&confidence_row(&g_label, &group.label_b, &group.result_b, &group.focus));
+        md.push_str(&confidence_row(
+            &g_label,
+            &group.label_a,
+            &group.result_a,
+            &group.focus,
+            group.confidence_threshold,
+        ));
+        md.push_str(&confidence_row(
+            &g_label,
+            &group.label_b,
+            &group.result_b,
+            &group.focus,
+            group.confidence_threshold,
+        ));
     }
-    md.push_str(&format!("\n_Threshold: {:.0}%_\n\n", CONFIDENCE_THRESHOLD * 100.0));
+    md.push_str(&format!(
+        "\n_Threshold: {:.0}% security/correctness, {:.0}% performance/maintainability \
+         (only enforced when verdicts disagree or a finding ≥ MEDIUM is reported)_\n\n",
+        STRICT_CONFIDENCE_THRESHOLD * 100.0,
+        LENIENT_CONFIDENCE_THRESHOLD * 100.0,
+    ));
 
     // ── Findings (merged across both pairs) ───────────────────────────────
     md.push_str("## Findings (merged & deduplicated)\n\n");
@@ -100,8 +119,14 @@ pub fn render_summary(result: &ConsensusResult) -> String {
 
 // ── Rendering helpers ─────────────────────────────────────────────────────────
 
-fn confidence_row(group_label: &str, model_label: &str, r: &ReviewResult, focus: &str) -> String {
-    let gate_ok = r.confidence >= CONFIDENCE_THRESHOLD && matches!(r.verdict, Verdict::Pass);
+fn confidence_row(
+    group_label: &str,
+    model_label: &str,
+    r: &ReviewResult,
+    focus: &str,
+    threshold: f64,
+) -> String {
+    let gate_ok = r.confidence >= threshold && matches!(r.verdict, Verdict::Pass);
     let gate_sym = if gate_ok { "✅" } else { "❌" };
     format!(
         "| {} | `{}` | {} | {} | {:.1}% | {} |\n",
@@ -219,6 +244,7 @@ mod tests {
             result_b: make_result(v, conf),
             merged_findings: vec![],
             pair_passed: passed,
+            confidence_threshold: STRICT_CONFIDENCE_THRESHOLD,
         }
     }
 
