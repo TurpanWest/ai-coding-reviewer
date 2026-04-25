@@ -11,7 +11,6 @@ jobs:
 
     permissions:
       contents: read
-      packages: read    # needed to pull from ghcr.io on private repos
 
     steps:
       - name: Checkout code
@@ -19,19 +18,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull reviewer image (or build locally if not yet published)
+      - name: Set image tag
+        # Local-only tag (we never push from this workflow). The name is
+        # arbitrary — keep it lowercase since Docker rejects uppercase repo
+        # paths, and ${{ github.repository }} can carry the owner's casing.
         run: |
-          docker pull ghcr.io/${{ github.repository }}:latest || {
-            echo "Image not found in registry — building from source (first-time setup)"
-            docker build -t ghcr.io/${{ github.repository }}:latest .
-          }
+          IMAGE=$(echo "ai-reviewer-pr:${{ github.event.pull_request.head.sha || github.sha }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build reviewer image from PR source
+        # Always rebuild from the PR's HEAD so we test the diff's own changes,
+        # not whatever stale :latest happens to be in the registry. The
+        # cargo-chef deps layer is cached across runs via GHA cache, so this
+        # only recompiles when Cargo.lock or src/** actually changed.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Generate diff (PR head vs base branch)
         run: |
@@ -43,14 +53,24 @@ jobs:
         env:
           REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
           REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
+          # Optional provider overrides (set as repo Variables or Secrets to use).
+          # Empty values fall back to the built-in defaults (minimax + deepseek).
+          REVIEWER_1_MODEL:    ${{ vars.REVIEWER_1_MODEL }}
+          REVIEWER_2_MODEL:    ${{ vars.REVIEWER_2_MODEL }}
+          REVIEWER_1_BASE_URL: ${{ vars.REVIEWER_1_BASE_URL }}
+          REVIEWER_2_BASE_URL: ${{ vars.REVIEWER_2_BASE_URL }}
           RUST_LOG: ai_reviewer=info
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
             -e REVIEWER_1_API_KEY \
             -e REVIEWER_2_API_KEY \
+            -e REVIEWER_1_MODEL \
+            -e REVIEWER_2_MODEL \
+            -e REVIEWER_1_BASE_URL \
+            -e REVIEWER_2_BASE_URL \
             -e RUST_LOG \
-            ghcr.io/${{ github.repository }}:latest \
+            "$IMAGE" \
             --diff /repo/pr.diff \
             --policy /repo/policy.md \
             --source-root /repo \
