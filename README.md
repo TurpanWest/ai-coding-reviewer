@@ -98,14 +98,27 @@ Create `policy.md` in your repo root. This is injected verbatim into the LLM pro
 
 See [`review-policy.example.md`](review-policy.example.md) for a full template.
 
-### 3. Add secrets and enable branch protection
+### 3. Add secrets, variables, and enable branch protection
 
-**Secrets** — repo Settings → Secrets and variables → Actions:
+Both live under repo **Settings → Secrets and variables → Actions** — but on different tabs.
+
+**Secrets** (required) — *Secrets* tab:
 
 | Secret | Description |
 |---|---|
 | `REVIEWER_1_API_KEY` | API key for the first reviewer model |
 | `REVIEWER_2_API_KEY` | API key for the second reviewer model |
+
+**Variables** (optional) — *Variables* tab. Skip these to use the built-in defaults (MiniMax + DeepSeek):
+
+| Variable | Description | Example |
+|---|---|---|
+| `REVIEWER_1_MODEL`    | Model ID for reviewer 1                | `MiniMax-M2.7` |
+| `REVIEWER_1_BASE_URL` | OpenAI-compat endpoint for reviewer 1  | `https://api.minimax.chat/v1` |
+| `REVIEWER_2_MODEL`    | Model ID for reviewer 2                | `deepseek-chat` |
+| `REVIEWER_2_BASE_URL` | OpenAI-compat endpoint for reviewer 2  | `https://api.deepseek.com/v1` |
+
+> Don't put model IDs / base URLs in the *Secrets* tab — Secrets are write-only in the UI and aren't sensitive here. Variables are editable and visible.
 
 **Branch protection** — Settings → Branches → Add rule:
 - Branch: `main`
