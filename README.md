@@ -37,10 +37,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute lowercase image ref
+        run: |
+          IMAGE=$(echo "ghcr.io/${{ github.repository }}:latest" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
       - name: Pull reviewer image
         run: |
-          docker pull ghcr.io/${{ github.repository }}:latest || \
-            docker build -t ghcr.io/${{ github.repository }}:latest .
+          docker pull "$IMAGE" || docker build -t "$IMAGE" .
 
       - name: Generate diff
         run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
@@ -64,7 +68,7 @@ jobs:
             -e REVIEWER_2_MODEL \
             -e REVIEWER_1_BASE_URL \
             -e REVIEWER_2_BASE_URL \
-            ghcr.io/${{ github.repository }}:latest \
+            "$IMAGE" \
             --diff /repo/pr.diff \
             --policy /repo/policy.md \
             --source-root /repo \

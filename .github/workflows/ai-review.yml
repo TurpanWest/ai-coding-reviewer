@@ -26,11 +26,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute lowercase image ref
+        # ghcr.io rejects uppercase in repo paths, but ${{ github.repository }}
+        # preserves the owner's original casing.
+        run: |
+          IMAGE=$(echo "ghcr.io/${{ github.repository }}:latest" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
       - name: Pull reviewer image (or build locally if not yet published)
         run: |
-          docker pull ghcr.io/${{ github.repository }}:latest || {
+          docker pull "$IMAGE" || {
             echo "Image not found in registry — building from source (first-time setup)"
-            docker build -t ghcr.io/${{ github.repository }}:latest .
+            docker build -t "$IMAGE" .
           }
 
       - name: Generate diff (PR head vs base branch)
@@ -60,7 +67,7 @@ jobs:
             -e REVIEWER_1_BASE_URL \
             -e REVIEWER_2_BASE_URL \
             -e RUST_LOG \
-            ghcr.io/${{ github.repository }}:latest \
+            "$IMAGE" \
             --diff /repo/pr.diff \
             --policy /repo/policy.md \
             --source-root /repo \
