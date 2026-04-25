@@ -43,12 +43,22 @@ jobs:
         env:
           REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
           REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
+          # Optional provider overrides (set as repo Variables or Secrets to use).
+          # Empty values fall back to the built-in defaults (minimax + deepseek).
+          REVIEWER_1_MODEL:    ${{ vars.REVIEWER_1_MODEL }}
+          REVIEWER_2_MODEL:    ${{ vars.REVIEWER_2_MODEL }}
+          REVIEWER_1_BASE_URL: ${{ vars.REVIEWER_1_BASE_URL }}
+          REVIEWER_2_BASE_URL: ${{ vars.REVIEWER_2_BASE_URL }}
           RUST_LOG: ai_reviewer=info
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
             -e REVIEWER_1_API_KEY \
             -e REVIEWER_2_API_KEY \
+            -e REVIEWER_1_MODEL \
+            -e REVIEWER_2_MODEL \
+            -e REVIEWER_1_BASE_URL \
+            -e REVIEWER_2_BASE_URL \
             -e RUST_LOG \
             ghcr.io/${{ github.repository }}:latest \
             --diff /repo/pr.diff \

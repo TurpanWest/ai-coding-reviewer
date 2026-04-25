@@ -173,7 +173,20 @@ async fn main() {
 }
 
 async fn run() -> Result<bool> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // GitHub Actions substitutes missing `${{ secrets.X }}` / `${{ vars.X }}`
+    // with empty strings, which clap stores as `Some("")`. Normalize to `None`
+    // so the default-model / default-base-url fallbacks fire as intended.
+    fn blank_to_none(s: Option<String>) -> Option<String> {
+        s.filter(|v| !v.is_empty())
+    }
+    cli.reviewer_1_api_key = blank_to_none(cli.reviewer_1_api_key);
+    cli.reviewer_2_api_key = blank_to_none(cli.reviewer_2_api_key);
+    cli.reviewer_1_model = blank_to_none(cli.reviewer_1_model);
+    cli.reviewer_2_model = blank_to_none(cli.reviewer_2_model);
+    cli.reviewer_1_base_url = blank_to_none(cli.reviewer_1_base_url);
+    cli.reviewer_2_base_url = blank_to_none(cli.reviewer_2_base_url);
 
     // ── Observability ──────────────────────────────────────────────────────
     // _guard flushes OTel spans on drop (end of this function).

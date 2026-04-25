@@ -49,11 +49,21 @@ jobs:
         env:
           REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
           REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
+          # Optional provider overrides — see "Changing providers" below.
+          # Empty values fall back to the built-in defaults (minimax + deepseek).
+          REVIEWER_1_MODEL:    ${{ vars.REVIEWER_1_MODEL }}
+          REVIEWER_2_MODEL:    ${{ vars.REVIEWER_2_MODEL }}
+          REVIEWER_1_BASE_URL: ${{ vars.REVIEWER_1_BASE_URL }}
+          REVIEWER_2_BASE_URL: ${{ vars.REVIEWER_2_BASE_URL }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
             -e REVIEWER_1_API_KEY \
             -e REVIEWER_2_API_KEY \
+            -e REVIEWER_1_MODEL \
+            -e REVIEWER_2_MODEL \
+            -e REVIEWER_1_BASE_URL \
+            -e REVIEWER_2_BASE_URL \
             ghcr.io/${{ github.repository }}:latest \
             --diff /repo/pr.diff \
             --policy /repo/policy.md \
@@ -101,7 +111,7 @@ See [`review-policy.example.md`](review-policy.example.md) for a full template.
 
 ## Changing providers
 
-By default both reviewers use the same provider. Override either slot via env vars:
+Defaults are MiniMax (reviewer 1) + DeepSeek (reviewer 2). Override either slot via these env vars:
 
 | Variable | Purpose |
 |---|---|
@@ -109,6 +119,12 @@ By default both reviewers use the same provider. Override either slot via env va
 | `REVIEWER_2_BASE_URL` | OpenAI-compat base URL for reviewer 2 |
 | `REVIEWER_1_MODEL` | Model ID for reviewer 1 |
 | `REVIEWER_2_MODEL` | Model ID for reviewer 2 |
+
+**Where to set them:**
+
+- **GitHub Actions** — repo Settings → Secrets and variables → Actions → **Variables** tab. Add `REVIEWER_1_MODEL` etc. as repo Variables. The Quick start workflow above already wires them through; leave them unset to fall back to the defaults.
+- **Local CLI** — export them in your shell before `cargo run` (or pass `--reviewer-1-model <id>` on the command line).
+- **Docker locally** — `docker run -e REVIEWER_1_MODEL=... -e REVIEWER_1_BASE_URL=... ...`.
 
 Any provider with an OpenAI-compatible `/v1/chat/completions` endpoint works (MiniMax, DeepSeek, Anthropic via proxy, Gemini, OpenAI, local Ollama, etc.).
 
