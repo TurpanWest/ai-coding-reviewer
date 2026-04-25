@@ -1,6 +1,6 @@
 # ai-reviewer
 
-AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must pass with confidence ≥ 0.90 or the merge is blocked.
+AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must vote PASS, and confidence thresholds (0.90 for security/correctness, 0.80 for performance/maintainability) gate the merge whenever the reviewers disagree or a finding of MEDIUM severity or higher is reported.
 
 ---
 
@@ -155,13 +155,15 @@ PR diff
   └─ parse → AST context extraction (13 languages)
        └─ prompt assembly (system: policy + schema | user: diff + symbols)
             └─ Model A ──┐
-                          ├─ consensus: both PASS + confidence ≥ 0.90?
+                          ├─ consensus: both PASS + (no ≥MEDIUM finding OR per-focus confidence cleared)?
             └─ Model B ──┘
                  └─ review-report.md  +  exit 0 (PASS) / 1 (FAIL) / 2 (error)
 ```
 
 - Both models run **concurrently** and review the same diff independently.
 - A finding is reported only when **both models agree** on the same file + line + rule.
+- The gate fails immediately if either model votes FAIL.
+- When both vote PASS, the per-focus confidence threshold — **0.90 for security/correctness, 0.80 for performance/maintainability** — is enforced as a tiebreaker, applied only when the merged findings contain something at MEDIUM severity or higher. A clean PASS with only LOW/INFO findings is allowed through regardless of confidence, since "uncertain style judgement" shouldn't be gated as hard as RCE-class defects.
 - Transient errors (timeout, 5xx, 429) are **retried with exponential backoff**; auth errors (401, 403, 404) fail fast.
 - AST context (full symbol definitions + call graph) is attached for 13 languages: Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala. Other languages are diff-only.
 
@@ -240,8 +242,8 @@ env_vars:
     RUST_LOG:            tracing filter, e.g. "ai_reviewer=debug"
 
 exit_codes:
-  0: consensus PASS — both models passed with confidence >= 0.90
-  1: consensus FAIL — any model failed or confidence below threshold
+  0: consensus PASS — both models voted PASS and any required confidence threshold was met
+  1: consensus FAIL — verdict mismatch, both-FAIL, or per-focus confidence below threshold when a >= MEDIUM finding or disagreement was present
   2: fatal error — bad diff path, missing policy file, diff too large, etc.
 
 outputs:
@@ -262,8 +264,12 @@ key_source_files:
   src/telemetry.rs:     Prometheus metrics export
 
 consensus_rule: >
-  PASS only when BOTH models return Verdict::Pass AND both confidence >= 0.90.
-  Any ReviewError becomes a synthetic Verdict::Fail with confidence=1.0.
+  PASS only when BOTH models return Verdict::Pass. The per-focus confidence
+  threshold (0.90 for security/correctness, 0.80 for performance/maintainability)
+  is then applied as a tiebreaker: it is enforced only when the merged findings
+  contain at least one finding of severity >= MEDIUM. A clean PASS with only
+  LOW/INFO findings is allowed through regardless of confidence. Any
+  ReviewError becomes a synthetic Verdict::Fail with confidence=1.0.
   Finding dedup key: (file, line_start, rule_id).
 
 retry_policy: >
