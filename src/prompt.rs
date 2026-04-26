@@ -209,7 +209,7 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
     out.push_str("Review the following changes. For each file you will receive:\n");
     out.push_str("1. The unified diff\n");
     out.push_str("2. The full AST context of every changed function/type\n");
-    out.push_str("3. The outgoing call graph from each changed symbol\n\n");
+    out.push_str("3. Bare callee names referenced from inside each changed symbol — single-file, unresolved (see caveat below)\n\n");
     out.push_str("---\n\n");
 
     for ctx in contexts {
@@ -233,12 +233,18 @@ pub fn build_user_prompt(contexts: &[FileAstContext]) -> String {
             }
         }
 
-        // ── Call graph ────────────────────────────────────────────────────
+        // ── Callee name hints (single-file, unresolved) ───────────────────
         if !ctx.call_edges.is_empty() {
-            out.push_str("#### Call Graph (from changed symbols)\n\n");
+            out.push_str("#### Callee Name Hints (from changed symbols)\n\n");
+            out.push_str(
+                "> ⚠️ These are **bare identifier strings** extracted from call sites inside each changed symbol — \
+                 not resolved symbols. There is no name resolution, no type inference, and no cross-file linking. \
+                 `auth::foo`, `self.foo`, and a local `foo` all appear as `\"foo\"`; `vec.push` and `string.push` both \
+                 appear as `\"push\"`. Use as a hint about what was referenced, not as a fact about which function was called.\n\n",
+            );
             let grouped = group_edges_by_caller(&ctx.call_edges);
             for (caller, callees) in &grouped {
-                out.push_str(&format!("- `{}` calls: {}\n", caller, callees.join(", ")));
+                out.push_str(&format!("- `{}` references: {}\n", caller, callees.join(", ")));
             }
 
             // Inline callee definitions that exist in the same file

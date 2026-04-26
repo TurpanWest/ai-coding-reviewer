@@ -165,7 +165,7 @@ PR diff
 - The gate fails immediately if either model votes FAIL.
 - When both vote PASS, the per-focus confidence threshold — **0.90 for security/correctness, 0.80 for performance/maintainability** — is enforced as a tiebreaker, applied only when the merged findings contain something at MEDIUM severity or higher. A clean PASS with only LOW/INFO findings is allowed through regardless of confidence, since "uncertain style judgement" shouldn't be gated as hard as RCE-class defects.
 - Transient errors (timeout, 5xx, 429) are **retried with exponential backoff**; auth errors (401, 403, 404) fail fast.
-- AST context (full symbol definitions + call graph) is attached for 13 languages: Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala. Other languages are diff-only.
+- AST context (full symbol definitions + intra-file callee name hints) is attached for 13 languages: Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala. Other languages are diff-only. See [Limitations & roadmap](#limitations--roadmap) for what "callee name hints" actually means — it is **not** a resolved cross-file call graph.
 
 ---
 
@@ -254,7 +254,7 @@ outputs:
 key_source_files:
   src/main.rs:          CLI entrypoint, provider wiring, concurrent orchestration
   src/diff.rs:          unified diff parser → FileDiff / HunkRange
-  src/ast.rs:           tree-sitter AST extraction + call graph (13 languages)
+  src/ast.rs:           tree-sitter AST extraction + intra-file callee name hints (13 languages)
   src/prompt.rs:        system prompt + user prompt assembly
   src/models/reviewer.rs: shared retry loop, JSON self-correction, strip helpers
   src/models/mod.rs:    ReviewResult / ConsensusResult types + JSON schema
@@ -292,6 +292,36 @@ pr_size_guidance:
     protobuf stubs, OpenAPI clients, DB migrations) are legitimately large — route through
     a dedicated review process rather than this gate.
 ```
+
+---
+
+## Limitations & roadmap
+
+### What the "AST context" actually contains today
+
+To set expectations correctly for anyone wiring this up: the AST context shipped to each model contains **full symbol definitions** for changed functions/types plus **single-file callee name hints** — not a resolved call graph.
+
+Concretely, for each changed symbol the tool emits a list of bare identifier strings that appear at call sites inside that symbol's body, scoped to the same file:
+
+- ✅ Full source of every changed function / class / struct / impl / trait
+- ✅ Bare names of callees that appear inside changed symbols (e.g. `verify_token`, `push`, `new`)
+- ✅ Inlined definitions of any callee whose name happens to match another symbol in the **same file**
+- ❌ No symbol resolution — `auth::verify_token`, `self.verify_token`, and a local `verify_token` all collapse to the string `"verify_token"`
+- ❌ No type inference — `vec.push()` and `string.push()` both produce the edge `… → "push"`
+- ❌ No cross-file edges — callers in other files are never linked, and callees defined in other files are emitted as bare names with no body
+- ❌ No reverse edges — the tool never answers "who calls this changed function?"
+
+So the callee data should be read as *"these names were referenced from inside the changed code"*, not *"these specific functions are called"*. The internal type is still named `CallEdge` for historical reasons, but the prompt now labels the section "Callee Name Hints" so reviewer models don't over-trust it.
+
+### Roadmap
+
+A real cross-file call graph (resolved fully-qualified names, type-aware method dispatch, reverse edges, blast-radius queries) is on the planned-work list. The likely path is to delegate resolution to a real indexer rather than reimplementing it on top of tree-sitter — candidates being evaluated:
+
+- **rust-analyzer / SCIP / LSIF** indexes consumed at review time
+- **stack-graphs** for multi-language name resolution
+- **LSP** "find references" against a warm language server
+
+If you have a strong opinion on which direction to take, open an issue.
 
 ---
 

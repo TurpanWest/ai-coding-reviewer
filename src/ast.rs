@@ -391,7 +391,18 @@ fn symbols_overlapping_hunks(symbols: &[Symbol], hunks: &[HunkRange]) -> Vec<Sym
         .collect()
 }
 
-// ── Call graph ────────────────────────────────────────────────────────────────
+// ── Callee name hints ─────────────────────────────────────────────────────────
+//
+// NOT a real call graph. For each changed symbol, this collects the bare
+// identifier text at call sites inside the symbol's body, scoped to the
+// current file only. There is no name resolution, no type inference, and
+// no cross-file linking — `vec.push()` and `string.push()` both yield
+// `… → "push"`, and `auth::foo`, `self.foo`, and a local `foo` all collapse
+// to `"foo"`. The output type is still named `CallEdge` for historical
+// reasons, but the prompt presents these as "callee name hints", not edges
+// in a resolved graph. A real cross-file call graph (via SCIP / LSIF /
+// rust-analyzer / stack-graphs) is on the roadmap — see README → "Limitations
+// & roadmap".
 
 fn collect_call_edges(
     changed_symbols: &[Symbol],
