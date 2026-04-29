@@ -49,6 +49,21 @@ jobs:
           echo "=== Diff stats ==="
           wc -l pr.diff
 
+      - name: Resolve risk level from PR label
+        # Looks for a label named `risk:low`, `risk:medium`, or `risk:high` on
+        # the PR.  First match wins.  Missing or unrecognised → `medium`,
+        # which reproduces the historical gate behaviour exactly.
+        id: risk
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          level=$(echo "$LABELS" \
+            | jq -r '.[] | select(test("^risk:(low|medium|high)$"))' \
+            | head -n1 \
+            | cut -d: -f2)
+          echo "level=${level:-medium}" >> "$GITHUB_OUTPUT"
+          echo "Resolved risk level: ${level:-medium}"
+
       - name: Run AI review
         env:
           REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
@@ -59,6 +74,8 @@ jobs:
           REVIEWER_2_MODEL:    ${{ vars.REVIEWER_2_MODEL }}
           REVIEWER_1_BASE_URL: ${{ vars.REVIEWER_1_BASE_URL }}
           REVIEWER_2_BASE_URL: ${{ vars.REVIEWER_2_BASE_URL }}
+          # Per-change risk level resolved from the PR's `risk:*` label above.
+          REVIEWER_RISK_LEVEL: ${{ steps.risk.outputs.level }}
           RUST_LOG: ai_reviewer=info
         run: |
           docker run --rm \
@@ -69,6 +86,7 @@ jobs:
             -e REVIEWER_2_MODEL \
             -e REVIEWER_1_BASE_URL \
             -e REVIEWER_2_BASE_URL \
+            -e REVIEWER_RISK_LEVEL \
             -e RUST_LOG \
             "$IMAGE" \
             --diff /repo/pr.diff \
