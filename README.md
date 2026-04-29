@@ -1,6 +1,6 @@
 # ai-reviewer
 
-AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must vote PASS, and confidence thresholds (0.90 for security/correctness, 0.80 for performance/maintainability) gate the merge whenever the reviewers disagree or a finding of MEDIUM severity or higher is reported.
+AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must vote PASS, and confidence thresholds (0.90 for security/correctness, 0.80 for performance/maintainability) gate the merge whenever the reviewers disagree or a finding of MEDIUM severity or higher is reported. The voting rule itself is selectable per change via a declared `low | medium | high` risk level — see [Risk levels](#risk-levels).
 
 ---
 
@@ -164,8 +164,53 @@ PR diff
 - A finding is reported only when **both models agree** on the same file + line + rule.
 - The gate fails immediately if either model votes FAIL.
 - When both vote PASS, the per-focus confidence threshold — **0.90 for security/correctness, 0.80 for performance/maintainability** — is enforced as a tiebreaker, applied only when the merged findings contain something at MEDIUM severity or higher. A clean PASS with only LOW/INFO findings is allowed through regardless of confidence, since "uncertain style judgement" shouldn't be gated as hard as RCE-class defects.
+- The voting rule above is the **`medium` risk level** — the default. The gate also supports `low` and `high` levels declared per change. See [Risk levels](#risk-levels) below.
 - Transient errors (timeout, 5xx, 429) are **retried with exponential backoff**; auth errors (401, 403, 404) fail fast.
 - AST context (full symbol definitions + intra-file callee name hints) is attached for 13 languages: Rust, Python, Go, JS/TS, Java, C, C++, Ruby, C#, Bash, Scala. Other languages are diff-only. See [Limitations & roadmap](#limitations--roadmap) for what "callee name hints" actually means — it is **not** a resolved cross-file call graph.
+
+---
+
+## Risk levels
+
+A docs typo and a crypto rewrite shouldn't share the same review bar. The developer (or the AI agent doing the change) **declares a risk level for the change**, and the gate picks a voting rule to match. Per-focus confidence thresholds are unchanged across all levels.
+
+| Risk | Pass condition | Use for |
+|---|---|---|
+| `low`    | **either** reviewer votes PASS — confidence ignored | docs, tests, comment-only edits, isolated typo fixes |
+| `medium` | both PASS, with per-focus confidence enforced when verdicts disagree or a `MEDIUM+` finding is present (the historical default) | ordinary feature work, refactors, bug fixes |
+| `high`   | both PASS **and** both clear the per-focus confidence threshold unconditionally — even with zero findings | auth, crypto, payments, schema migrations, public API contracts |
+
+**The declaration is trusted verbatim.** The reviewer does not second-guess a `low` declaration, even when the diff touches sensitive code; an out-of-band reviewer (human or another tool) is expected to police obviously bad calls. The declared level is rendered prominently in `review-report.md` and printed on stdout to make abuse easy to spot.
+
+### Declaring risk on a PR
+
+The simplest path is a PR label or a body line. The CLI reads `--risk-level` (or env var `REVIEWER_RISK_LEVEL`); your CI step extracts the value before invoking the binary:
+
+```yaml
+- name: Resolve risk level from PR label
+  id: risk
+  env:
+    LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+  run: |
+    level=$(echo "$LABELS" | jq -r '.[]' | grep -E '^risk:(low|medium|high)$' | head -n1 | cut -d: -f2)
+    echo "level=${level:-medium}" >> "$GITHUB_OUTPUT"
+
+- name: Run AI Review
+  env:
+    REVIEWER_1_API_KEY: ${{ secrets.REVIEWER_1_API_KEY }}
+    REVIEWER_2_API_KEY: ${{ secrets.REVIEWER_2_API_KEY }}
+    REVIEWER_RISK_LEVEL: ${{ steps.risk.outputs.level }}
+  run: |
+    docker run --rm -i ${{ env.IMAGE }} --diff - --policy policy.md < pr.diff
+```
+
+Apply a PR label `risk:low`, `risk:medium`, or `risk:high`; missing label → defaults to `medium` (zero behaviour change vs. the historical gate).
+
+Locally:
+
+```bash
+git diff HEAD~1 | cargo run -- --diff - --policy policy.md --risk-level high
+```
 
 ---
 
@@ -228,6 +273,7 @@ interface:
     --policy:      path to Markdown policy file injected into the system prompt (required)
     --source-root: repo root for AST context extraction and tool-call file access (optional)
     --output:      path for the Markdown report (default: review-report.md)
+    --risk-level:  low | medium | high — selects the gate's voting rule (default: medium)
     -v/--verbose:  enable verbose tracing output
 
 env_vars:
@@ -235,11 +281,12 @@ env_vars:
     REVIEWER_1_API_KEY: API key for the first LLM reviewer
     REVIEWER_2_API_KEY: API key for the second LLM reviewer
   optional:
-    REVIEWER_1_BASE_URL: OpenAI-compat base URL (default: provider-specific)
-    REVIEWER_2_BASE_URL: OpenAI-compat base URL (default: provider-specific)
-    REVIEWER_1_MODEL:    model ID override for reviewer 1
-    REVIEWER_2_MODEL:    model ID override for reviewer 2
-    RUST_LOG:            tracing filter, e.g. "ai_reviewer=debug"
+    REVIEWER_1_BASE_URL:  OpenAI-compat base URL (default: provider-specific)
+    REVIEWER_2_BASE_URL:  OpenAI-compat base URL (default: provider-specific)
+    REVIEWER_1_MODEL:     model ID override for reviewer 1
+    REVIEWER_2_MODEL:     model ID override for reviewer 2
+    REVIEWER_RISK_LEVEL:  declared risk level for this change — low | medium | high (default: medium)
+    RUST_LOG:             tracing filter, e.g. "ai_reviewer=debug"
 
 exit_codes:
   0: consensus PASS — both models voted PASS and any required confidence threshold was met
@@ -264,12 +311,14 @@ key_source_files:
   src/telemetry.rs:     Prometheus metrics export
 
 consensus_rule: >
-  PASS only when BOTH models return Verdict::Pass. The per-focus confidence
-  threshold (0.90 for security/correctness, 0.80 for performance/maintainability)
-  is then applied as a tiebreaker: it is enforced only when the merged findings
-  contain at least one finding of severity >= MEDIUM. A clean PASS with only
-  LOW/INFO findings is allowed through regardless of confidence. Any
-  ReviewError becomes a synthetic Verdict::Fail with confidence=1.0.
+  Voting rule is selected by the declared --risk-level (default: medium).
+    low    — either reviewer voting PASS is enough; confidence ignored.
+    medium — both must vote PASS; per-focus confidence (0.90 sec/correct,
+             0.80 perf/maint) enforced only when verdicts disagree or a
+             >= MEDIUM finding is reported. Historical default.
+    high   — both must vote PASS AND both must clear the per-focus
+             confidence threshold unconditionally, even with zero findings.
+  Any ReviewError becomes a synthetic Verdict::Fail with confidence=1.0.
   Finding dedup key: (file, line_start, rule_id).
 
 retry_policy: >

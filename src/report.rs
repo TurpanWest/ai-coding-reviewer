@@ -24,6 +24,12 @@ pub fn render_report(result: &ConsensusResult) -> String {
     md.push_str(&format!("## Verdict: {badge}\n\n"));
     md.push_str(&format!("> {color_note}\n\n"));
 
+    md.push_str(&format!(
+        "**Declared risk level**: `{}` _(voting rule: {})_\n\n",
+        result.risk_level.as_str(),
+        result.risk_level.vote_rule(),
+    ));
+
     if !result.gate_passed {
         md.push_str("### Failure Analysis\n\n");
         md.push_str(&format!("**Reason**: {}\n\n", gate_failure_reason(result)));
@@ -84,9 +90,11 @@ pub fn render_report(result: &ConsensusResult) -> String {
             group.files.join(", ")
         };
         let title = format!(
-            "Group {} — {} — Files: {}",
+            "Group {} — {} (risk={}, {}) — Files: {}",
             group.group_index + 1,
             group.focus.to_uppercase(),
+            group.risk_level.as_str(),
+            group.risk_level.vote_rule(),
             files_str,
         );
         md.push_str(&pair_section(&title, group));
@@ -110,8 +118,9 @@ pub fn render_summary(result: &ConsensusResult) -> String {
     }).collect();
 
     format!(
-        "[ai-reviewer] Verdict: {}  |  {}  |  Findings: {}",
+        "[ai-reviewer] Verdict: {}  |  risk={}  |  {}  |  Findings: {}",
         result.verdict,
+        result.risk_level.as_str(),
         group_tokens.join("  |  "),
         result.all_findings.len(),
     )
@@ -219,7 +228,7 @@ fn severity_badge(s: &Severity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CodeLocation, Finding, Severity};
+    use crate::models::{CodeLocation, Finding, RiskLevel, Severity};
 
     fn make_result(verdict: Verdict, confidence: f64) -> ReviewResult {
         ReviewResult {
@@ -245,6 +254,7 @@ mod tests {
             merged_findings: vec![],
             pair_passed: passed,
             confidence_threshold: STRICT_CONFIDENCE_THRESHOLD,
+            risk_level: RiskLevel::Medium,
         }
     }
 
@@ -255,6 +265,7 @@ mod tests {
             groups: vec![make_pair(passed)],
             all_findings: vec![],
             gate_passed: passed,
+            risk_level: RiskLevel::Medium,
         }
     }
 
@@ -263,6 +274,20 @@ mod tests {
         let s = render_summary(&make_consensus(true));
         assert!(s.contains("PASS"));
         assert!(s.contains("Findings: 0"));
+        assert!(s.contains("risk=medium"));
+    }
+
+    #[test]
+    fn test_render_report_shows_declared_risk() {
+        let mut c = make_consensus(true);
+        c.risk_level = RiskLevel::High;
+        for g in &mut c.groups {
+            g.risk_level = RiskLevel::High;
+        }
+        let r = render_report(&c);
+        assert!(r.contains("Declared risk level"));
+        assert!(r.contains("`high`"));
+        assert!(r.contains("risk=high"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::{
     CodeLocation, ConsensusResult, Finding, PairResult, ReviewError, ReviewFocus, ReviewResult,
-    Severity, Verdict,
+    RiskLevel, Severity, Verdict,
 };
 use crate::policy::filter_findings;
 
@@ -35,13 +35,18 @@ fn is_blocking_severity(s: &Severity) -> bool {
 
 /// Evaluate a single reviewer pair and produce a `PairResult`.
 ///
-/// The pair passes only when both models return `Pass`.  Once that's true,
-/// the confidence threshold is applied as a *tiebreaker*: it must be cleared
-/// only when the pair is in a contested state — either there's a disagreement
-/// (one model voted `Fail`, handled above as auto-fail) or the merged findings
-/// include something at MEDIUM severity or higher.  When both models are
-/// confident PASS and report nothing meaningful, low confidence on its own
-/// will not block the gate — that path is essentially style judgement.
+/// The voting rule is selected by `risk_level`:
+///
+/// - `Low`    — *any-pass*: a single PASS verdict is enough; confidence is
+///   ignored.  A reviewer error producing a synthetic FAIL is non-blocking
+///   when the other side passed.
+/// - `Medium` — *both-pass + severity-aware confidence*: both reviewers must
+///   vote PASS, and the per-focus confidence threshold is enforced only when
+///   verdicts disagree (impossible past the both-pass gate) or a MEDIUM+
+///   finding is reported.  This is the historical default.
+/// - `High`   — *both-pass + confidence*: both reviewers must vote PASS *and*
+///   clear the per-focus confidence threshold unconditionally, even with
+///   zero findings.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_pair(
     res_a: Result<ReviewResult, ReviewError>,
@@ -49,6 +54,7 @@ pub fn evaluate_pair(
     label_a: String,
     label_b: String,
     focus: ReviewFocus,
+    risk_level: RiskLevel,
     group_index: usize,
     files: Vec<String>,
     allowed_rules: &HashSet<String>,
@@ -61,16 +67,23 @@ pub fn evaluate_pair(
 
     let threshold = confidence_threshold_for(focus);
 
-    let both_pass = matches!(result_a.verdict, Verdict::Pass)
-        && matches!(result_b.verdict, Verdict::Pass);
+    let a_pass = matches!(result_a.verdict, Verdict::Pass);
+    let b_pass = matches!(result_b.verdict, Verdict::Pass);
+    let both_confident = result_a.confidence >= threshold && result_b.confidence >= threshold;
 
     let merged_findings = merge_and_dedup(&result_a.findings, &result_b.findings);
     let has_blocking_finding = merged_findings.iter().any(|f| is_blocking_severity(&f.severity));
 
-    let confidence_required = !both_pass || has_blocking_finding;
-    let both_confident = result_a.confidence >= threshold && result_b.confidence >= threshold;
-
-    let pair_passed = both_pass && (!confidence_required || both_confident);
+    let pair_passed = match risk_level {
+        RiskLevel::Low => a_pass || b_pass,
+        RiskLevel::Medium => {
+            // Identical to the historical (pre-risk-level) gate logic.
+            let both_pass = a_pass && b_pass;
+            let confidence_required = !both_pass || has_blocking_finding;
+            both_pass && (!confidence_required || both_confident)
+        }
+        RiskLevel::High => a_pass && b_pass && both_confident,
+    };
 
     PairResult {
         focus: focus.as_str().to_owned(),
@@ -83,6 +96,7 @@ pub fn evaluate_pair(
         merged_findings,
         pair_passed,
         confidence_threshold: threshold,
+        risk_level,
     }
 }
 
@@ -90,7 +104,7 @@ pub fn evaluate_pair(
 
 /// Combine all group pair results into the overall `ConsensusResult`.
 /// The gate passes only when **every group** passes.
-pub fn evaluate(groups: Vec<PairResult>) -> ConsensusResult {
+pub fn evaluate(groups: Vec<PairResult>, risk_level: RiskLevel) -> ConsensusResult {
     let gate_passed = groups.iter().all(|g| g.pair_passed);
     let verdict = if gate_passed { Verdict::Pass } else { Verdict::Fail };
 
@@ -99,7 +113,7 @@ pub fn evaluate(groups: Vec<PairResult>) -> ConsensusResult {
         .collect();
     let all_findings = merge_and_dedup(&flat, &[]);
 
-    ConsensusResult { verdict, groups, all_findings, gate_passed }
+    ConsensusResult { verdict, groups, all_findings, gate_passed, risk_level }
 }
 
 /// Returns a human-readable explanation of *why* the gate failed.
@@ -119,35 +133,60 @@ pub fn gate_failure_reason(result: &ConsensusResult) -> String {
             let focus = group.focus.to_uppercase();
             let g = group.group_index + 1;
             let threshold = group.confidence_threshold;
+            let risk = group.risk_level;
+            let prefix = format!("[G{g}/{focus} @ risk={}]", risk.as_str());
 
-            let both_pass = matches!(a.verdict, Verdict::Pass)
-                && matches!(b.verdict, Verdict::Pass);
-            let has_blocking_finding = group
-                .merged_findings
-                .iter()
-                .any(|f| is_blocking_severity(&f.severity));
-            let confidence_required = !both_pass || has_blocking_finding;
+            let a_pass = matches!(a.verdict, Verdict::Pass);
+            let b_pass = matches!(b.verdict, Verdict::Pass);
+
+            // Whether the confidence threshold is the actual gating clause
+            // depends on the risk level.
+            let confidence_required = match risk {
+                RiskLevel::Low => false,
+                RiskLevel::Medium => {
+                    let both_pass = a_pass && b_pass;
+                    let has_blocking_finding = group
+                        .merged_findings
+                        .iter()
+                        .any(|f| is_blocking_severity(&f.severity));
+                    !both_pass || has_blocking_finding
+                }
+                RiskLevel::High => true,
+            };
 
             if confidence_required && a.confidence < threshold {
                 reasons.push(format!(
-                    "[G{g}/{focus}] {la} confidence too low ({:.2} < {:.2})",
+                    "{prefix} {la} confidence too low ({:.2} < {:.2})",
                     a.confidence, threshold
                 ));
             }
             if confidence_required && b.confidence < threshold {
                 reasons.push(format!(
-                    "[G{g}/{focus}] {lb} confidence too low ({:.2} < {:.2})",
+                    "{prefix} {lb} confidence too low ({:.2} < {:.2})",
                     b.confidence, threshold
                 ));
             }
-            if a.verdict != b.verdict {
-                reasons.push(format!(
-                    "[G{g}/{focus}] Verdict conflict: {la}={} vs {lb}={}",
-                    a.verdict, b.verdict
-                ));
-            }
-            if matches!(a.verdict, Verdict::Fail) && matches!(b.verdict, Verdict::Fail) {
-                reasons.push(format!("[G{g}/{focus}] Both models confirmed defects"));
+
+            // Verdict reasons.  Under `low`, a single PASS already passes the
+            // pair, so a verdict mismatch is by design and shouldn't appear
+            // in the failure reasons.
+            match risk {
+                RiskLevel::Low => {
+                    if !a_pass && !b_pass {
+                        reasons.push(format!("{prefix} Both models confirmed defects"));
+                    }
+                }
+                RiskLevel::Medium | RiskLevel::High => {
+                    if a.verdict != b.verdict {
+                        reasons.push(format!(
+                            "{prefix} Verdict conflict: {la}={} vs {lb}={}",
+                            a.verdict, b.verdict
+                        ));
+                    }
+                    if !a_pass && !b_pass {
+                        reasons.push(format!("{prefix} Both models confirmed defects"));
+                    }
+                }
             }
         }
     }
@@ -307,12 +346,30 @@ mod tests {
         rb: Result<ReviewResult, ReviewError>,
         focus: ReviewFocus,
     ) -> PairResult {
+        pair_with(ra, rb, focus, RiskLevel::Medium)
+    }
+
+    fn pair_with_risk(
+        ra: Result<ReviewResult, ReviewError>,
+        rb: Result<ReviewResult, ReviewError>,
+        risk: RiskLevel,
+    ) -> PairResult {
+        pair_with(ra, rb, ReviewFocus::Security, risk)
+    }
+
+    fn pair_with(
+        ra: Result<ReviewResult, ReviewError>,
+        rb: Result<ReviewResult, ReviewError>,
+        focus: ReviewFocus,
+        risk: RiskLevel,
+    ) -> PairResult {
         evaluate_pair(
             ra,
             rb,
             "A".into(),
             "B".into(),
             focus,
+            risk,
             0,
             vec![],
             &allowed_rules(),
@@ -408,7 +465,7 @@ mod tests {
             pair(Ok(pass(0.95)), Ok(pass(0.95))),
             pair(Ok(pass(0.92)), Ok(pass(0.91))),
         ];
-        let r = evaluate(pairs);
+        let r = evaluate(pairs, RiskLevel::Medium);
         assert!(r.gate_passed);
         assert_eq!(r.verdict, Verdict::Pass);
     }
@@ -419,7 +476,7 @@ mod tests {
             pair(Ok(pass(0.95)), Ok(pass(0.95))),
             pair(Ok(fail_result(0.95)), Ok(pass(0.95))),
         ];
-        let r = evaluate(pairs);
+        let r = evaluate(pairs, RiskLevel::Medium);
         assert!(!r.gate_passed);
         assert_eq!(r.verdict, Verdict::Fail);
     }
@@ -489,15 +546,102 @@ mod tests {
     #[test]
     fn test_gate_failure_reason_passed_returns_simple_string() {
         let pairs = vec![pair(Ok(pass(0.95)), Ok(pass(0.95)))];
-        let r = evaluate(pairs);
+        let r = evaluate(pairs, RiskLevel::Medium);
         assert_eq!(gate_failure_reason(&r), "Gate passed.");
     }
 
     #[test]
     fn test_gate_failure_reason_mentions_focus() {
         let pairs = vec![pair(Ok(fail_result(0.95)), Ok(pass(0.95)))];
-        let r = evaluate(pairs);
+        let r = evaluate(pairs, RiskLevel::Medium);
         let reason = gate_failure_reason(&r);
         assert!(reason.to_uppercase().contains("SECURITY"));
+    }
+
+    #[test]
+    fn test_gate_failure_reason_mentions_risk() {
+        let pairs = vec![pair_with_risk(
+            Ok(pass(0.85)),
+            Ok(pass(0.85)),
+            RiskLevel::High,
+        )];
+        let r = evaluate(pairs, RiskLevel::High);
+        let reason = gate_failure_reason(&r);
+        assert!(reason.contains("risk=high"), "got: {reason}");
+    }
+
+    // ── risk level: low (any-pass) ────────────────────────────────────────────
+
+    #[test]
+    fn test_low_risk_single_pass_passes() {
+        // a=Pass + b=Fail under low risk → pair passes (single PASS suffices).
+        let p = pair_with_risk(Ok(pass(0.95)), Ok(fail_result(0.95)), RiskLevel::Low);
+        assert!(p.pair_passed);
+    }
+
+    #[test]
+    fn test_low_risk_both_fail_blocks() {
+        let p = pair_with_risk(Ok(fail_result(0.95)), Ok(fail_result(0.95)), RiskLevel::Low);
+        assert!(!p.pair_passed);
+    }
+
+    #[test]
+    fn test_low_risk_reviewer_error_with_other_pass_passes() {
+        // A reviewer error becomes a synthetic Fail; the other side PASS keeps
+        // the pair green under low risk.
+        let p = pair_with_risk(
+            Err(ReviewError::Completion("boom".into())),
+            Ok(pass(0.95)),
+            RiskLevel::Low,
+        );
+        assert!(p.pair_passed);
+    }
+
+    #[test]
+    fn test_low_risk_ignores_low_confidence() {
+        // Even with both reviewers PASS at very low confidence and a HIGH
+        // finding present, low risk still passes.
+        let mut a = pass(0.40);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::High)];
+        let p = pair_with_risk(Ok(a), Ok(pass(0.40)), RiskLevel::Low);
+        assert!(p.pair_passed);
+    }
+
+    // ── risk level: high (always-confidence) ──────────────────────────────────
+
+    #[test]
+    fn test_high_risk_blocks_below_strict_even_without_findings() {
+        // 0.85 < strict 0.90, no findings.  Under medium this passes (severity
+        // exemption); under high it must block — that's the whole point of high.
+        let p = pair_with_risk(Ok(pass(0.85)), Ok(pass(0.85)), RiskLevel::High);
+        assert!(!p.pair_passed);
+    }
+
+    #[test]
+    fn test_high_risk_passes_at_or_above_strict() {
+        let p = pair_with_risk(Ok(pass(0.92)), Ok(pass(0.91)), RiskLevel::High);
+        assert!(p.pair_passed);
+    }
+
+    #[test]
+    fn test_high_risk_one_fail_blocks() {
+        let p = pair_with_risk(Ok(pass(0.95)), Ok(fail_result(0.95)), RiskLevel::High);
+        assert!(!p.pair_passed);
+    }
+
+    // ── risk level: medium (zero-regression invariant) ────────────────────────
+
+    #[test]
+    fn test_medium_risk_preserves_existing_behaviour() {
+        // Replays test_pair_low_confidence_passes_without_blocking_findings via
+        // the new helper to lock in: medium == today.
+        let p = pair_with_risk(Ok(pass(0.70)), Ok(pass(0.65)), RiskLevel::Medium);
+        assert!(p.pair_passed);
+
+        // And blocking-finding case still blocks.
+        let mut a = pass(0.85);
+        a.findings = vec![finding("f.rs", 1, "R1", Severity::Medium)];
+        let p = pair_with_risk(Ok(a), Ok(pass(0.85)), RiskLevel::Medium);
+        assert!(!p.pair_passed);
     }
 }

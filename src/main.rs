@@ -20,7 +20,7 @@ use rig::providers::{anthropic, gemini, openai};
 use tracing::info;
 
 use crate::models::reviewer::LlmReviewer;
-use crate::models::{ReviewFocus, Reviewer};
+use crate::models::{ReviewFocus, Reviewer, RiskLevel};
 use crate::telemetry::{record_review, Metrics};
 
 // ── Provider selection ─────────────────────────────────────────────────────────
@@ -98,6 +98,13 @@ struct Cli {
     #[arg(short = 't', long, default_value_t = 0.90, value_parser = parse_threshold)]
     threshold: f64,
 
+    /// Declared risk level for this change.  Selects the gate's voting rule:
+    /// `low` = either reviewer passing is enough,
+    /// `medium` = both must pass with severity-aware confidence (default — today's behaviour),
+    /// `high` = both must pass and both must clear the per-focus confidence threshold.
+    #[arg(long, value_enum, default_value_t = RiskLevel::Medium, env = "REVIEWER_RISK_LEVEL")]
+    risk_level: RiskLevel,
+
     /// Output path for the Markdown review report (defaults to <source-root>/review-report.md)
     #[arg(short = 'o', long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -174,6 +181,15 @@ async fn main() {
 }
 
 async fn run() -> Result<bool> {
+    // GitHub Actions substitutes missing `${{ vars.X }}` with an empty string.
+    // clap's ValueEnum would reject `""` for --risk-level with a confusing
+    // error; strip the empty value so the default ("medium") kicks in.
+    if std::env::var("REVIEWER_RISK_LEVEL").is_ok_and(|v| v.trim().is_empty()) {
+        // SAFETY: called before any threads are spawned (tokio runtime is
+        // already up but no user code is reading env yet).
+        unsafe { std::env::remove_var("REVIEWER_RISK_LEVEL"); }
+    }
+
     let mut cli = Cli::parse();
 
     // GitHub Actions substitutes missing `${{ secrets.X }}` / `${{ vars.X }}`
@@ -202,6 +218,7 @@ async fn run() -> Result<bool> {
     info!(
         diff_bytes = diff_text.len(),
         policy_bytes = policy_text.len(),
+        risk_level = cli.risk_level.as_str(),
         "Inputs loaded"
     );
 
@@ -351,13 +368,13 @@ async fn run() -> Result<bool> {
         record_review(&metrics, &label_a, focus.as_str(), dur, &r_a);
         record_review(&metrics, &label_b, focus.as_str(), dur, &r_b);
         let pair = consensus::evaluate_pair(
-            r_a, r_b, label_a, label_b, focus, i, file_names, &allowed_rules,
+            r_a, r_b, label_a, label_b, focus, cli.risk_level, i, file_names, &allowed_rules,
         );
         pair_results.push(pair);
     }
 
     // ── Consensus evaluation ───────────────────────────────────────────────
-    let consensus = consensus::evaluate(pair_results);
+    let consensus = consensus::evaluate(pair_results, cli.risk_level);
 
     // ── Output ─────────────────────────────────────────────────────────────
     println!("{}", report::render_summary(&consensus));

@@ -5,6 +5,49 @@ pub mod reviewer;
 
 pub use crate::prompt::ReviewFocus;
 
+// ── Risk level (per-change declaration) ──────────────────────────────────────
+
+/// Developer-declared risk level for the current change.  Selects the gate's
+/// voting rule; the per-focus confidence thresholds are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum RiskLevel {
+    /// Either reviewer voting PASS is enough.  Confidence is not enforced.
+    Low,
+    /// Default behaviour: both reviewers must vote PASS, and confidence is
+    /// enforced only when verdicts disagree or a MEDIUM+ finding is reported.
+    Medium,
+    /// Both reviewers must vote PASS *and* clear the per-focus confidence
+    /// threshold unconditionally — even with zero findings.
+    High,
+}
+
+impl RiskLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RiskLevel::Low => "low",
+            RiskLevel::Medium => "medium",
+            RiskLevel::High => "high",
+        }
+    }
+
+    /// Short human-readable name of the active voting rule.
+    pub fn vote_rule(self) -> &'static str {
+        match self {
+            RiskLevel::Low => "any-pass",
+            RiskLevel::Medium => "both-pass+severity-aware",
+            RiskLevel::High => "both-pass+confidence",
+        }
+    }
+}
+
+impl std::fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ── Core verdict / severity types ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -94,6 +137,8 @@ pub struct PairResult {
     pub pair_passed: bool,
     /// Confidence threshold applied to this pair (focus-dependent).
     pub confidence_threshold: f64,
+    /// Risk level under which this pair was evaluated.
+    pub risk_level: RiskLevel,
 }
 
 /// Final output of the consensus engine combining all four focus groups.
@@ -105,6 +150,8 @@ pub struct ConsensusResult {
     /// All findings from every group, merged and deduplicated.
     pub all_findings: Vec<Finding>,
     pub gate_passed: bool,
+    /// Risk level declared for this run (drives the voting rule).
+    pub risk_level: RiskLevel,
 }
 
 // ── Reviewer trait ────────────────────────────────────────────────────────────
