@@ -93,6 +93,12 @@ impl ReviewFocus {
 /// tells the model about the `read_file` / `find_symbol` tools it can call for
 /// additional context (the reviewer always registers them).
 /// `policy_text` is the raw Markdown content of the security/coding policy file.
+///
+/// Layout note: every byte that varies per focus is appended **last** so the
+/// preceding mission / policy / schema / rules block is a byte-identical prefix
+/// across all four focus groups. Providers that key prefix caches from token 0
+/// (OpenAI-compat) can therefore share the cache between focuses for the same
+/// model, not just across reruns of a single focus.
 pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
     let focus_section = match focus {
         ReviewFocus::Security => {
@@ -101,7 +107,7 @@ pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
              broken access control, sensitive data exposure, insecure or deprecated cryptography,\n\
              SSRF, path traversal, deserialization flaws, hardcoded secrets/API keys,\n\
              missing or bypassable input validation, unsafe use of eval/exec/shell.\n\
-             Do NOT report correctness, performance, or maintainability issues — those are handled by dedicated reviewers.\n\n"
+             Do NOT report correctness, performance, or maintainability issues — those are handled by dedicated reviewers.\n"
         }
         ReviewFocus::Correctness => {
             "## Your Assigned Focus: CORRECTNESS\n\
@@ -109,7 +115,7 @@ pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
              null/nil dereferences, use-after-free, off-by-one errors, incorrect error handling,\n\
              unchecked return values, data races & concurrency bugs, broken invariants,\n\
              silent failure paths, API misuse that causes wrong behaviour, regressions.\n\
-             Do NOT report security, performance, or maintainability issues — those are handled by dedicated reviewers.\n\n"
+             Do NOT report security, performance, or maintainability issues — those are handled by dedicated reviewers.\n"
         }
         ReviewFocus::Performance => {
             "## Your Assigned Focus: PERFORMANCE\n\
@@ -118,7 +124,7 @@ pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
              blocking / synchronous calls inside async executors,\n\
              N+1 query patterns, unbounded memory growth, cache-unfriendly data access,\n\
              holding locks or large allocations across await points.\n\
-             Do NOT report security, correctness, or maintainability issues — those are handled by dedicated reviewers.\n\n"
+             Do NOT report security, correctness, or maintainability issues — those are handled by dedicated reviewers.\n"
         }
         ReviewFocus::Maintainability => {
             "## Your Assigned Focus: MAINTAINABILITY\n\
@@ -126,17 +132,17 @@ pub fn build_system_prompt(policy_text: &str, focus: ReviewFocus) -> String {
              overly complex control flow, missing or misleading comments/documentation,\n\
              single-responsibility violations, hardcoded magic values, test coverage gaps\n\
              for new branches, use of deprecated APIs, tight coupling & missing abstractions.\n\
-             Do NOT report security, correctness, or performance issues — those are handled by dedicated reviewers.\n\n"
+             Do NOT report security, correctness, or performance issues — those are handled by dedicated reviewers.\n"
         }
     };
 
     format!(
-        r#"{focus_section}You are a ruthless, expert security and correctness code reviewer operating inside a fully automated CI/CD pipeline.
+        r#"You are a ruthless, expert security and correctness code reviewer operating inside a fully automated CI/CD pipeline.
 There are no human reviewers in this loop. Your findings directly gate production deployments.
 
 ## Your Mission
 Analyse the provided code diff and its surrounding AST context with rigour.
-Detect every **genuine** issue within your assigned focus area above.
+Detect every **genuine** issue within the focus area assigned to you at the end of this prompt.
 
 Both false negatives AND false positives carry real cost:
 - A missed real bug ships to production.
@@ -193,7 +199,10 @@ Use `read_file` or `find_symbol` when:
 Call tools as needed before producing your verdict. When you have sufficient context,
 output the final JSON review result as your last message.
 Do NOT call tools to re-read content already visible in the diff or symbol context above.
-"#,
+
+---
+
+{focus_section}"#,
         focus_section = focus_section,
         policy_text = policy_text,
         REVIEW_JSON_SCHEMA = REVIEW_JSON_SCHEMA,
@@ -545,6 +554,46 @@ mod tests {
         let out = format_symbol(&sym, "python");
         assert!(out.contains("```python"), "expected python fence, got: {out}");
         assert!(!out.contains("```rust"), "should not have rust fence: {out}");
+    }
+
+    // ── System prompt prefix-cache invariant ──────────────────────────────────
+
+    /// All four focuses must share a byte-identical prefix so providers that key
+    /// prefix caches from token 0 (OpenAI-compat) can hit the cache across
+    /// focuses, not only across reruns of the same focus.
+    #[test]
+    fn test_system_prompt_shares_prefix_across_focuses() {
+        let policy = "POLICY-MARKER";
+        let prompts = [
+            build_system_prompt(policy, ReviewFocus::Security),
+            build_system_prompt(policy, ReviewFocus::Correctness),
+            build_system_prompt(policy, ReviewFocus::Performance),
+            build_system_prompt(policy, ReviewFocus::Maintainability),
+        ];
+
+        let common: usize = prompts[0]
+            .as_bytes()
+            .iter()
+            .zip(prompts[1].as_bytes())
+            .zip(prompts[2].as_bytes())
+            .zip(prompts[3].as_bytes())
+            .take_while(|(((a, b), c), d)| a == b && a == c && a == d)
+            .count();
+
+        // The shared prefix must include the policy text — that is the whole
+        // reason for the layout.
+        let shared = &prompts[0][..common];
+        assert!(
+            shared.contains(policy),
+            "policy text must live inside the shared prefix; shared len = {common}"
+        );
+        // And it must extend well past the policy (schema, rules, tool usage).
+        assert!(
+            common > prompts[0].len() - 800,
+            "only the trailing focus block should diverge; \
+             shared = {common} bytes, total = {} bytes",
+            prompts[0].len()
+        );
     }
 
     // ── ReviewFocus::as_str ───────────────────────────────────────────────────
