@@ -1,5 +1,7 @@
 # ai-coding-reviewer
 
+> 中文版: [README.zh-CN.md](README.zh-CN.md)
+
 AI-to-AI code review gate for GitHub PRs. Two LLM models independently review every diff; both must vote PASS, and confidence thresholds (0.90 for security/correctness, 0.80 for performance/maintainability) gate the merge whenever the reviewers disagree or a finding of MEDIUM severity or higher is reported. The voting rule itself is selectable per change via a declared `low | medium | high` risk level — see [Risk levels](#risk-levels).
 
 ---
